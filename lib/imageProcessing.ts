@@ -129,3 +129,49 @@ export const compositeImage = async (
     bgImg.src = backgroundDataUrl;
   });
 };
+
+export const applyLogo = async (
+  baseDataUrl: string,
+  logoDataUrl: string,
+  scale: number = 0.15,
+  offsetX: number = 9,
+  offsetY: number = 9
+): Promise<string> => {
+  return new Promise((resolve, reject) => {
+    const baseImg = new Image();
+    const logoImg = new Image();
+
+    baseImg.onload = () => {
+      logoImg.onload = () => {
+        const canvas = document.createElement("canvas");
+        canvas.width = baseImg.width;
+        canvas.height = baseImg.height;
+        const ctx = canvas.getContext("2d");
+
+        if (!ctx) {
+          reject(new Error("Failed to get canvas context"));
+          return;
+        }
+
+        ctx.drawImage(baseImg, 0, 0);
+
+        const finalW = baseImg.width * scale;
+        const finalH = (logoImg.height / logoImg.width) * finalW;
+
+        const drawX = (baseImg.width * offsetX) / 100;
+        const drawY = (baseImg.height * offsetY) / 100;
+
+        ctx.drawImage(logoImg, drawX, drawY, finalW, finalH);
+
+        const isPng = baseDataUrl.startsWith("data:image/png");
+        resolve(canvas.toDataURL(isPng ? "image/png" : "image/jpeg", 0.95));
+      };
+
+      logoImg.onerror = reject;
+      logoImg.src = logoDataUrl;
+    };
+
+    baseImg.onerror = reject;
+    baseImg.src = baseDataUrl;
+  });
+};

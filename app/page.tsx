@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { removeWhiteBackground, compositeImage } from "@/lib/imageProcessing";
+import { removeWhiteBackground, compositeImage, applyLogo } from "@/lib/imageProcessing";
 import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
@@ -24,6 +24,11 @@ export default function Home() {
   const [images, setImages] = useState<ProcessedImage[]>([]);
   const [bgImageFile, setBgImageFile] = useState<File | null>(null);
   const [bgImageUrl, setBgImageUrl] = useState<string | null>(null);
+  const [logoFile, setLogoFile] = useState<File | null>(null);
+  const [logoUrl, setLogoUrl] = useState<string | null>(null);
+  const [logoScale, setLogoScale] = useState<number>(0.15);
+  const [logoX, setLogoX] = useState<number>(9);
+  const [logoY, setLogoY] = useState<number>(9);
   const [tolerance, setTolerance] = useState<number>(20);
   const [subjectScale, setSubjectScale] = useState<number>(1.0);
   const [subjectX, setSubjectX] = useState<number>(0);
@@ -48,7 +53,7 @@ export default function Home() {
 
   // Debounced effect for individual recompositions
   useEffect(() => {
-    if (!editingImageId || !bgImageUrl) return;
+    if (!editingImageId || (!bgImageUrl && !logoUrl)) return;
     const img = images.find(p => p.id === editingImageId);
     if (!img || !img.transparentUrl) return;
 
@@ -59,7 +64,13 @@ export default function Home() {
     const timeout = setTimeout(async () => {
       setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "processing" } : p));
       try {
-        const compositedUrl = await compositeImage(img.transparentUrl!, bgImageUrl, scale, x, y);
+        let compositedUrl = null;
+        if (bgImageUrl) {
+          compositedUrl = await compositeImage(img.transparentUrl!, bgImageUrl, scale, x, y);
+        }
+        if (logoUrl) {
+          compositedUrl = await applyLogo(compositedUrl || img.transparentUrl!, logoUrl, logoScale, logoX, logoY);
+        }
         setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl, status: "done" } : p));
       } catch (e) {
         setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
@@ -68,7 +79,7 @@ export default function Home() {
     return () => clearTimeout(timeout);
   }, [
     editingImageId,
-    bgImageUrl,
+    bgImageUrl, logoUrl, logoScale, logoX, logoY,
     images.find(p => p.id === editingImageId)?.customScale,
     images.find(p => p.id === editingImageId)?.customX,
     images.find(p => p.id === editingImageId)?.customY
@@ -77,6 +88,7 @@ export default function Home() {
   // File Input Refs
   const foregroundInputRef = useRef<HTMLInputElement>(null);
   const backgroundInputRef = useRef<HTMLInputElement>(null);
+  const logoInputRef = useRef<HTMLInputElement>(null);
 
   // Handle Foreground Images Upload
   const handleForegroundUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -106,6 +118,9 @@ export default function Home() {
 
         if (bgImageUrl) {
           compositedUrl = await compositeImage(transparentUrl, bgImageUrl, subjectScale, subjectX, subjectY);
+        }
+        if (logoUrl) {
+          compositedUrl = await applyLogo(compositedUrl || transparentUrl, logoUrl, logoScale, logoX, logoY);
         }
 
         setImages(prev => prev.map(p =>
@@ -140,7 +155,10 @@ export default function Home() {
           const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
           const actX = img.customX !== undefined ? img.customX : subjectX;
           const actY = img.customY !== undefined ? img.customY : subjectY;
-          const compositedUrl = await compositeImage(img.transparentUrl, url, actScale, actX, actY);
+          let compositedUrl = await compositeImage(img.transparentUrl, url, actScale, actX, actY);
+          if (logoUrl) {
+            compositedUrl = await applyLogo(compositedUrl, logoUrl, logoScale, logoX, logoY);
+          }
           setImages(prev => prev.map(p =>
             p.id === img.id ? { ...p, compositedUrl, status: "done" } : p
           ));
@@ -157,16 +175,82 @@ export default function Home() {
     setImages(prev => prev.filter(img => img.id !== id));
   };
 
-  const clearBackground = () => {
+  const clearBackground = async () => {
     setBgImageFile(null);
     setBgImageUrl(null);
-    setImages(prev => prev.map(img => ({ ...img, compositedUrl: null })));
+
+    if (logoUrl) {
+      setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
+      for (const img of images) {
+        if (img.transparentUrl) {
+          try {
+            const compositedUrl = await applyLogo(img.transparentUrl, logoUrl, logoScale, logoX, logoY);
+            setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl, status: "done" } : p));
+          } catch (e) {
+            setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
+          }
+        }
+      }
+    } else {
+      setImages(prev => prev.map(img => ({ ...img, compositedUrl: null })));
+    }
+  };
+
+  const clearLogo = async () => {
+    setLogoFile(null);
+    setLogoUrl(null);
+
+    setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
+    for (const img of images) {
+      if (img.transparentUrl) {
+        try {
+          let compositedUrl = null;
+          if (bgImageUrl) {
+            const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
+            const actX = img.customX !== undefined ? img.customX : subjectX;
+            const actY = img.customY !== undefined ? img.customY : subjectY;
+            compositedUrl = await compositeImage(img.transparentUrl, bgImageUrl, actScale, actX, actY);
+          }
+          setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl, status: "done" } : p));
+        } catch (e) {
+          setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
+        }
+      }
+    }
+  };
+
+  // Handle Logo Upload
+  const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files?.length) return;
+    const file = e.target.files[0];
+    const url = URL.createObjectURL(file);
+    setLogoFile(file);
+    setLogoUrl(url);
+
+    setImages(prev => prev.map(img => ({ ...img, status: img.status === "done" ? "processing" : img.status })));
+    for (const img of images) {
+      if (img.transparentUrl) {
+        try {
+          let compositedUrl = null;
+          if (bgImageUrl) {
+            const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
+            const actX = img.customX !== undefined ? img.customX : subjectX;
+            const actY = img.customY !== undefined ? img.customY : subjectY;
+            compositedUrl = await compositeImage(img.transparentUrl, bgImageUrl, actScale, actX, actY);
+          }
+          compositedUrl = await applyLogo(compositedUrl || img.transparentUrl, url, logoScale, logoX, logoY);
+          setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl, status: "done" } : p));
+        } catch (error) {
+          setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
+        }
+      }
+    }
   };
 
   const downloadAll = async () => {
     const zip = new JSZip();
     const transparentFolder = zip.folder("Transparent_PNGs");
-    const compositedFolder = zip.folder("Composited_JPEGs");
+    const compositedFolder = zip.folder("Final_Images");
 
     for (const img of images) {
       if (img.transparentUrl && transparentFolder) {
@@ -178,7 +262,8 @@ export default function Home() {
       if (img.compositedUrl && compositedFolder) {
         const response = await fetch(img.compositedUrl);
         const blob = await response.blob();
-        compositedFolder.file(`${img.name.split('.')[0]}_composited.jpg`, blob);
+        const ext = blob.type === "image/png" ? "png" : "jpg";
+        compositedFolder.file(`${img.name.split('.')[0]}_final.${ext}`, blob);
       }
     }
 
@@ -188,16 +273,22 @@ export default function Home() {
 
   // Trigger re-composite when subject placement changes
   useEffect(() => {
-    if (images.length === 0 || !bgImageUrl) return;
+    if (images.length === 0 || (!bgImageUrl && !logoUrl)) return;
     const recomposite = async () => {
       setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
       for (const img of images) {
         if (img.transparentUrl) {
           try {
-            const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
-            const actX = img.customX !== undefined ? img.customX : subjectX;
-            const actY = img.customY !== undefined ? img.customY : subjectY;
-            const compositedUrl = await compositeImage(img.transparentUrl, bgImageUrl, actScale, actX, actY);
+            let compositedUrl = null;
+            if (bgImageUrl) {
+              const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
+              const actX = img.customX !== undefined ? img.customX : subjectX;
+              const actY = img.customY !== undefined ? img.customY : subjectY;
+              compositedUrl = await compositeImage(img.transparentUrl, bgImageUrl, actScale, actX, actY);
+            }
+            if (logoUrl) {
+              compositedUrl = await applyLogo(compositedUrl || img.transparentUrl, logoUrl, logoScale, logoX, logoY);
+            }
             setImages(prev => prev.map(p =>
               p.id === img.id ? { ...p, compositedUrl, status: "done" } : p
             ));
@@ -211,7 +302,7 @@ export default function Home() {
     };
     const timeout = setTimeout(recomposite, 200);
     return () => clearTimeout(timeout);
-  }, [subjectScale, subjectX, subjectY]);
+  }, [subjectScale, subjectX, subjectY, logoScale, logoX, logoY]);
 
   // Trigger re-process when tolerance changes
   useEffect(() => {
@@ -228,6 +319,9 @@ export default function Home() {
             const actX = img.customX !== undefined ? img.customX : subjectX;
             const actY = img.customY !== undefined ? img.customY : subjectY;
             compositedUrl = await compositeImage(transparentUrl, bgImageUrl, actScale, actX, actY);
+          }
+          if (logoUrl) {
+            compositedUrl = await applyLogo(compositedUrl || transparentUrl, logoUrl, logoScale, logoX, logoY);
           }
           setImages(prev => prev.map(p =>
             p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
@@ -344,6 +438,125 @@ export default function Home() {
                 className="hidden"
                 onChange={handleBackgroundUpload}
               />
+            </div>
+
+            {/* Watermark Logo */}
+            <div className="liquid-glass p-8 rounded-[2.5rem] transition-all">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-lg font-bold flex items-center gap-3 text-foreground">
+                  <ImageIcon className="w-5 h-5 text-accent" />
+                  Watermark
+                </h3>
+                {logoUrl && (
+                  <button onClick={clearLogo} className="text-xs text-red-500 hover:text-red-400 transition-colors font-semibold uppercase tracking-wider">Clear</button>
+                )}
+              </div>
+
+              {logoUrl ? (
+                <div className="relative rounded-[1.5rem] overflow-hidden aspect-[4/3] border border-border group shadow-sm bg-muted/20 checkerboard">
+                  <img src={logoUrl} alt="Logo" className="w-[85%] h-[85%] mx-auto my-auto object-contain drop-shadow-md" style={{ marginTop: '7.5%' }} />
+                  <div className="absolute inset-0 bg-background/50 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center">
+                    <motion.button
+                      whileTap={{ scale: 0.95 }}
+                      onClick={() => logoInputRef.current?.click()}
+                      className="px-5 py-2.5 bg-foreground text-background rounded-full font-semibold text-sm shadow-xl"
+                    >
+                      Replace Logo
+                    </motion.button>
+                  </div>
+                </div>
+              ) : (
+                <div
+                  onClick={() => logoInputRef.current?.click()}
+                  className="group border border-dashed border-muted-foreground/30 bg-muted/5 rounded-[1.5rem] p-10 flex flex-col items-center justify-center text-center cursor-pointer hover:border-accent hover:bg-accent/5 transition-all duration-300"
+                >
+                  <ImageIcon className="w-8 h-8 mb-4 text-muted-foreground group-hover:text-accent transition-colors" />
+                  <p className="font-semibold text-foreground">Add Logo</p>
+                  <p className="text-sm text-muted-foreground mt-2 font-medium">PNG recommended</p>
+                </div>
+              )}
+
+              <input
+                ref={logoInputRef}
+                type="file"
+                accept="image/*"
+                className="hidden"
+                onChange={handleLogoUpload}
+              />
+
+              {logoUrl && (
+                <div className="pt-6 mt-6 border-t border-border/50 space-y-5">
+                  <label className="text-sm font-bold tracking-tight text-foreground flex items-center gap-2 pb-2">
+                    Logo Placement
+                  </label>
+
+                  {/* Logo Scale */}
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-medium text-muted-foreground">Scale</span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number" min="0.01" max="1.0" step="0.01"
+                          value={logoScale}
+                          onChange={(e) => setLogoScale(parseFloat(e.target.value) || 0.15)}
+                          className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                        />
+                        <span className="text-muted-foreground text-xs font-mono">x</span>
+                      </div>
+                    </div>
+                    <input
+                      type="range" min="0.01" max="1.0" step="0.01"
+                      value={logoScale}
+                      onChange={(e) => setLogoScale(parseFloat(e.target.value))}
+                      className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
+                    />
+                  </div>
+
+                  {/* Logo Pos X */}
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-medium text-muted-foreground">Pos X</span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number" min="0" max="100"
+                          value={logoX}
+                          onChange={(e) => setLogoX(parseInt(e.target.value) || 0)}
+                          className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                        />
+                        <span className="text-muted-foreground text-xs font-mono">%</span>
+                      </div>
+                    </div>
+                    <input
+                      type="range" min="0" max="100"
+                      value={logoX}
+                      onChange={(e) => setLogoX(parseInt(e.target.value))}
+                      className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
+                    />
+                  </div>
+
+                  {/* Logo Pos Y */}
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-medium text-muted-foreground">Pos Y</span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number" min="0" max="100"
+                          value={logoY}
+                          onChange={(e) => setLogoY(parseInt(e.target.value) || 0)}
+                          className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                        />
+                        <span className="text-muted-foreground text-xs font-mono">%</span>
+                      </div>
+                    </div>
+                    <input
+                      type="range" min="0" max="100"
+                      value={logoY}
+                      onChange={(e) => setLogoY(parseInt(e.target.value))}
+                      className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
+                    />
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Settings Node */}
