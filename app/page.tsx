@@ -373,57 +373,74 @@ export default function Home() {
                 </div>
 
                 {bgImageUrl && (
-                  <div className="pt-4 border-t border-slate-100 dark:border-slate-800 space-y-4">
-                    <label className="text-sm font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-2 pb-2">
+                  <div className="pt-6 mt-6 border-t border-border/50 space-y-5">
+                    <label className="text-sm font-bold tracking-tight text-foreground flex items-center gap-2 pb-2">
                       Subject Placement
                     </label>
 
                     {/* Scale */}
-                    <div>
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="text-xs text-slate-500">Scale</span>
-                        <span className="text-xs font-mono">{subjectScale.toFixed(2)}x</span>
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-medium text-muted-foreground">Scale</span>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number" min="0.1" max="3.0" step="0.05"
+                            value={subjectScale}
+                            onChange={(e) => setSubjectScale(parseFloat(e.target.value) || 1)}
+                            className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                          />
+                          <span className="text-muted-foreground text-xs font-mono">x</span>
+                        </div>
                       </div>
                       <input
-                        type="range"
-                        min="0.1"
-                        max="3.0"
-                        step="0.05"
+                        type="range" min="0.1" max="3.0" step="0.05"
                         value={subjectScale}
                         onChange={(e) => setSubjectScale(parseFloat(e.target.value))}
-                        className="w-full accent-purple-500"
+                        className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
                       />
                     </div>
 
                     {/* Position X */}
-                    <div>
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="text-xs text-slate-500">Position X</span>
-                        <span className="text-xs font-mono">{subjectX}%</span>
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-medium text-muted-foreground">Pos X</span>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number" min="-100" max="100"
+                            value={subjectX}
+                            onChange={(e) => setSubjectX(parseInt(e.target.value) || 0)}
+                            className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                          />
+                          <span className="text-muted-foreground text-xs font-mono">%</span>
+                        </div>
                       </div>
                       <input
-                        type="range"
-                        min="-100"
-                        max="100"
+                        type="range" min="-100" max="100"
                         value={subjectX}
                         onChange={(e) => setSubjectX(parseInt(e.target.value))}
-                        className="w-full accent-purple-500"
+                        className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
                       />
                     </div>
 
                     {/* Position Y */}
-                    <div>
-                      <div className="flex justify-between items-center mb-1">
-                        <span className="text-xs text-slate-500">Position Y</span>
-                        <span className="text-xs font-mono">{subjectY}%</span>
+                    <div className="space-y-2">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-medium text-muted-foreground">Pos Y</span>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="number" min="-100" max="100"
+                            value={subjectY}
+                            onChange={(e) => setSubjectY(parseInt(e.target.value) || 0)}
+                            className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                          />
+                          <span className="text-muted-foreground text-xs font-mono">%</span>
+                        </div>
                       </div>
                       <input
-                        type="range"
-                        min="-100"
-                        max="100"
+                        type="range" min="-100" max="100"
                         value={subjectY}
                         onChange={(e) => setSubjectY(parseInt(e.target.value))}
-                        className="w-full accent-purple-500"
+                        className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
                       />
                     </div>
                   </div>

@@ -85,3 +85,15 @@
   background-size: 20px 20px;
   background-position: 0 0, 10px 10px;
 }
+
+/* Hide number input spinners for cleaner UI */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
