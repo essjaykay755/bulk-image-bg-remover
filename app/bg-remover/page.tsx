@@ -162,6 +162,12 @@ export default function Home() {
     setImages(prev => prev.filter(img => img.id !== id));
   };
 
+  const clearAllImages = () => {
+    if (window.confirm("Are you sure you want to remove all images?")) {
+      setImages([]);
+    }
+  };
+
   const clearBackground = async () => {
     setBgImageFile(null);
     setBgImageUrl(null);
@@ -279,6 +285,12 @@ export default function Home() {
 
             {images.length > 0 && (
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                <button
+                  onClick={clearAllImages}
+                  className="px-6 py-3.5 text-sm font-semibold text-red-500 hover:text-red-600 bg-red-50/50 hover:bg-red-50 dark:bg-red-950/20 dark:hover:bg-red-950/40 rounded-full transition-colors order-last sm:order-first"
+                >
+                  Clear All
+                </button>
                 <input
                   type="text"
                   value={zipFileName}
