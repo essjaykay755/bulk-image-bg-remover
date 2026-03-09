@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { removeWhiteBackground, compositeImage } from "@/lib/imageProcessing";
 import Link from "next/link";
-import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, ArrowLeft, FolderOpen, Loader2, X } from "lucide-react";
+import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, ArrowLeft, FolderOpen, Loader2, X, CheckSquare, Square } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
@@ -60,6 +60,18 @@ export default function Home() {
 
   // Flag to skip the slider-triggered recomposite when presets handle it directly
   const skipRecompositeRef = useRef(false);
+
+  // Multi-select state
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
+  const toggleSelect = (id: string) => {
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  };
+  const selectAll = () => setSelectedIds(new Set(images.map(img => img.id)));
+  const clearSelection = () => setSelectedIds(new Set());
 
   // Apply custom placement to a specific image
   const handleCustomPlacement = (id: string, scale: number, x: number, y: number, reset: boolean = false) => {
@@ -361,6 +373,40 @@ export default function Home() {
       await yieldToMain();
     }
     setBatchProgress(null);
+  };
+
+  // Apply a preset to only the selected images (with progress bar)
+  const applyPresetToSelected = async (scale: number, x: number, y: number) => {
+    if (!bgImageUrl || selectedIds.size === 0) return;
+    const currentImages = imagesRef.current;
+    const toProcess = currentImages.filter(img => selectedIds.has(img.id) && img.transparentUrl);
+    if (toProcess.length === 0) return;
+
+    const total = toProcess.length;
+    setBatchProgress({ label: "Applying Preset to Selected", current: 0, total, currentFile: "" });
+    setImages(prev => prev.map(img => selectedIds.has(img.id) ? { ...img, status: "processing" } : img));
+    let processed = 0;
+
+    for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
+      const batch = toProcess.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (img) => {
+        try {
+          const compositedUrl = await compositeImage(img.transparentUrl!, bgImageUrl, scale, x, y);
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, compositedUrl, customScale: scale, customX: x, customY: y, status: "done" } : p
+          ));
+        } catch (e) {
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, status: "error" } : p
+          ));
+        }
+        processed++;
+        setBatchProgress({ label: "Applying Preset to Selected", current: processed, total, currentFile: img.name });
+      }));
+      await yieldToMain();
+    }
+    setBatchProgress(null);
+    clearSelection();
   };
 
   // Trigger re-composite when subject placement changes (sliders only, no progress bar)
@@ -723,11 +769,20 @@ export default function Home() {
                       animate={{ opacity: 1, y: 0 }}
                       exit={{ opacity: 0, scale: 0.95 }}
                       key={img.id}
-                      className="liquid-glass rounded-[2rem] overflow-hidden group flex flex-col shadow-sm hover:shadow-xl transition-shadow duration-500"
+                      className={`liquid-glass rounded-[2rem] overflow-hidden group flex flex-col shadow-sm hover:shadow-xl transition-all duration-300 ${selectedIds.has(img.id) ? 'ring-2 ring-accent ring-offset-2 ring-offset-background' : ''}`}
                     >
                       {/* Header */}
                       <div className="flex items-center justify-between px-5 py-4 border-b border-border/50 bg-background/30 backdrop-blur-md z-20 relative">
-                        <p className="font-semibold text-sm truncate max-w-[70%] text-foreground">{img.name}</p>
+                        <div className="flex items-center gap-2 min-w-0">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); toggleSelect(img.id); }}
+                            className={`flex-shrink-0 p-1 rounded transition-colors ${selectedIds.has(img.id) ? 'text-accent' : 'text-muted-foreground/40 hover:text-muted-foreground'}`}
+                            title="Select"
+                          >
+                            {selectedIds.has(img.id) ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                          </button>
+                          <p className="font-semibold text-sm truncate text-foreground">{img.name}</p>
+                        </div>
                         <div className="flex gap-1.5">
                           {bgImageUrl && (
                             <button
@@ -782,6 +837,48 @@ export default function Home() {
           </main>
         </div>
       </div>
+
+      {/* Floating Selection Action Bar */}
+      <AnimatePresence>
+        {selectedIds.size > 0 && bgImageUrl && (
+          <motion.div
+            initial={{ opacity: 0, y: 40 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 40 }}
+            className="fixed bottom-8 left-1/2 -translate-x-1/2 z-40 liquid-glass rounded-full px-6 py-3 shadow-2xl border border-border/50 flex items-center gap-4"
+          >
+            <span className="text-sm font-semibold text-foreground whitespace-nowrap">
+              {selectedIds.size} selected
+            </span>
+            <div className="w-px h-6 bg-border" />
+            <button
+              onClick={selectAll}
+              className="text-xs font-semibold text-muted-foreground hover:text-foreground transition-colors whitespace-nowrap"
+            >
+              Select All
+            </button>
+            <button
+              onClick={clearSelection}
+              className="text-xs font-semibold text-red-500 hover:text-red-400 transition-colors whitespace-nowrap"
+            >
+              Clear
+            </button>
+            <div className="w-px h-6 bg-border" />
+            {[
+              { label: "Preset 1", scale: 0.55, x: 0, y: 14 },
+              { label: "Preset 2", scale: 0.65, x: 0, y: 14 }
+            ].map(preset => (
+              <button
+                key={preset.label}
+                onClick={() => applyPresetToSelected(preset.scale, preset.x, preset.y)}
+                className="text-xs font-semibold uppercase tracking-wider bg-foreground text-background px-3 py-1.5 rounded-full hover:opacity-90 transition-opacity shadow-md whitespace-nowrap"
+              >
+                {preset.label}
+              </button>
+            ))}
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Editor Modal */}
       <AnimatePresence>
