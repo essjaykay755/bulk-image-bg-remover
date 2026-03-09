@@ -46,9 +46,20 @@ export default function Home() {
     total: number;
   } | null>(null);
 
+  // Batch processing progress state (for bg removal, bg application, presets)
+  const [batchProgress, setBatchProgress] = useState<{
+    label: string;
+    current: number;
+    total: number;
+    currentFile: string;
+  } | null>(null);
+
   // Keep a ref to images for use in async closures that outlive renders
   const imagesRef = useRef<ProcessedImage[]>([]);
   useEffect(() => { imagesRef.current = images; }, [images]);
+
+  // Flag to skip the slider-triggered recomposite when presets handle it directly
+  const skipRecompositeRef = useRef(false);
 
   // Apply custom placement to a specific image
   const handleCustomPlacement = (id: string, scale: number, x: number, y: number, reset: boolean = false) => {
@@ -108,7 +119,6 @@ export default function Home() {
     setIsProcessingAll(true);
     const files = Array.from(e.target.files);
 
-    // Add to state immediately as processing
     const newImages: ProcessedImage[] = files.map(file => ({
       id: Math.random().toString(36).substring(7),
       originalFile: file,
@@ -120,8 +130,10 @@ export default function Home() {
     }));
 
     setImages(prev => [...prev, ...newImages]);
+    const total = newImages.length;
+    setBatchProgress({ label: "Removing Backgrounds", current: 0, total, currentFile: "" });
+    let processed = 0;
 
-    // Process in batches to avoid memory exhaustion
     for (let i = 0; i < newImages.length; i += BATCH_SIZE) {
       const batch = newImages.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (img) => {
@@ -140,10 +152,12 @@ export default function Home() {
             p.id === img.id ? { ...p, status: "error" } : p
           ));
         }
+        processed++;
+        setBatchProgress({ label: "Removing Backgrounds", current: processed, total, currentFile: img.name });
       }));
-      // Yield to main thread between batches so GC can run and UI stays responsive
       await yieldToMain();
     }
+    setBatchProgress(null);
     setIsProcessingAll(false);
   };
 
@@ -172,6 +186,9 @@ export default function Home() {
     });
 
     setImages(prev => [...prev, ...newImages]);
+    const total = newImages.length;
+    setBatchProgress({ label: "Removing Backgrounds", current: 0, total, currentFile: "" });
+    let processed = 0;
 
     // Process in batches
     for (let i = 0; i < newImages.length; i += BATCH_SIZE) {
@@ -192,9 +209,12 @@ export default function Home() {
             p.id === img.id ? { ...p, status: "error" } : p
           ));
         }
+        processed++;
+        setBatchProgress({ label: "Removing Backgrounds", current: processed, total, currentFile: img.relativePath || img.name });
       }));
       await yieldToMain();
     }
+    setBatchProgress(null);
     setIsProcessingAll(false);
     // Reset input so re-selecting the same folder triggers onChange
     e.target.value = "";
@@ -209,12 +229,15 @@ export default function Home() {
     setBgImageFile(file);
     setBgImageUrl(url);
 
-    // Use ref to get latest images (avoids stale closure)
     const currentImages = imagesRef.current;
     setImages(prev => prev.map(img => ({ ...img, status: img.transparentUrl ? "processing" : img.status })));
 
-    // Process in batches
     const toProcess = currentImages.filter(img => img.transparentUrl);
+    if (toProcess.length === 0) return;
+    const total = toProcess.length;
+    setBatchProgress({ label: "Applying Background", current: 0, total, currentFile: "" });
+    let processed = 0;
+
     for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
       const batch = toProcess.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (img) => {
@@ -231,9 +254,12 @@ export default function Home() {
             p.id === img.id ? { ...p, status: "done" } : p
           ));
         }
+        processed++;
+        setBatchProgress({ label: "Applying Background", current: processed, total, currentFile: img.name });
       }));
       await yieldToMain();
     }
+    setBatchProgress(null);
   };
 
   const removeImage = (id: string) => {
@@ -296,9 +322,55 @@ export default function Home() {
     setZipProgress(null);
   };
 
-  // Trigger re-composite when subject placement changes
+  // Apply a global preset with progress bar (presets bypass the slider useEffect)
+  const applyGlobalPreset = async (scale: number, x: number, y: number) => {
+    skipRecompositeRef.current = true;
+    setSubjectScale(scale);
+    setSubjectX(x);
+    setSubjectY(y);
+
+    if (!bgImageUrl) return;
+    const currentImages = imagesRef.current;
+    const toProcess = currentImages.filter(img => img.transparentUrl);
+    if (toProcess.length === 0) return;
+
+    const total = toProcess.length;
+    setBatchProgress({ label: "Applying Preset", current: 0, total, currentFile: "" });
+    setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
+    let processed = 0;
+
+    for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
+      const batch = toProcess.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (img) => {
+        try {
+          const actScale = img.customScale !== undefined ? img.customScale : scale;
+          const actX = img.customX !== undefined ? img.customX : x;
+          const actY = img.customY !== undefined ? img.customY : y;
+          const compositedUrl = await compositeImage(img.transparentUrl!, bgImageUrl, actScale, actX, actY);
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, compositedUrl, status: "done" } : p
+          ));
+        } catch (e) {
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, status: "error" } : p
+          ));
+        }
+        processed++;
+        setBatchProgress({ label: "Applying Preset", current: processed, total, currentFile: img.name });
+      }));
+      await yieldToMain();
+    }
+    setBatchProgress(null);
+  };
+
+  // Trigger re-composite when subject placement changes (sliders only, no progress bar)
   useEffect(() => {
     if (images.length === 0 || !bgImageUrl) return;
+    // Skip if a preset just handled this
+    if (skipRecompositeRef.current) {
+      skipRecompositeRef.current = false;
+      return;
+    }
     const recomposite = async () => {
       const currentImages = imagesRef.current;
       setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
@@ -548,11 +620,7 @@ export default function Home() {
                         ].map(preset => (
                           <button
                             key={preset.label}
-                            onClick={() => {
-                              setSubjectScale(preset.scale);
-                              setSubjectX(preset.x);
-                              setSubjectY(preset.y);
-                            }}
+                            onClick={() => applyGlobalPreset(preset.scale, preset.x, preset.y)}
                             className="text-[10px] font-semibold uppercase tracking-wider bg-background hover:bg-muted text-muted-foreground hover:text-foreground px-2 py-1 rounded border border-border transition-colors shadow-sm"
                           >
                             {preset.label}
@@ -872,6 +940,51 @@ export default function Home() {
                     Save & Close
                   </button>
                 </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Batch Processing Progress Modal */}
+      <AnimatePresence>
+        {batchProgress && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-background/80 backdrop-blur-xl"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              className="w-full max-w-md liquid-glass rounded-[2rem] p-8 shadow-2xl"
+            >
+              <div className="flex items-center gap-4 mb-6">
+                <div className="w-12 h-12 rounded-full bg-accent/10 flex items-center justify-center">
+                  <Loader2 className="w-6 h-6 text-accent animate-spin" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-foreground">{batchProgress.label}</h3>
+                  <p className="text-sm text-muted-foreground">
+                    {batchProgress.current} / {batchProgress.total} images
+                  </p>
+                </div>
+              </div>
+
+              <div className="w-full h-2 bg-border rounded-full overflow-hidden mb-5">
+                <motion.div
+                  className="h-full bg-accent rounded-full"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${batchProgress.total > 0 ? (batchProgress.current / batchProgress.total) * 100 : 0}%` }}
+                  transition={{ ease: "easeOut", duration: 0.3 }}
+                />
+              </div>
+
+              <div className="flex items-center gap-2 bg-muted/30 rounded-xl p-4 border border-border/50">
+                <FileImage className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                <span className="text-sm text-muted-foreground truncate">{batchProgress.currentFile}</span>
               </div>
             </motion.div>
           </motion.div>
