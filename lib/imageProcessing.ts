@@ -46,8 +46,15 @@ export const removeWhiteBackground = async (imageFile: File, tolerance: number =
       }
 
       ctx.putImageData(imageData, 0, 0);
-      resolve(canvas.toDataURL("image/png"));
-      URL.revokeObjectURL(url);
+      // Use toBlob instead of toDataURL to avoid massive base64 strings in JS heap
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(URL.createObjectURL(blob));
+        } else {
+          reject(new Error("Failed to create image blob"));
+        }
+        URL.revokeObjectURL(url);
+      }, "image/png");
     };
 
     img.onerror = () => {
@@ -117,8 +124,14 @@ export const compositeImage = async (
 
         ctx.drawImage(fgImg, drawX, drawY, finalW, finalH);
 
-        // Export as JPEG since it's composited and shouldn't have transparency
-        resolve(canvas.toDataURL("image/jpeg", 0.95));
+        // Use toBlob instead of toDataURL to avoid massive base64 strings in JS heap
+        canvas.toBlob((blob) => {
+          if (blob) {
+            resolve(URL.createObjectURL(blob));
+          } else {
+            reject(new Error("Failed to create image blob"));
+          }
+        }, "image/jpeg", 0.95);
       };
 
       fgImg.onerror = reject;

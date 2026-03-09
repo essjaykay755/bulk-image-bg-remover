@@ -3,10 +3,13 @@
 import { useState, useRef, useEffect } from "react";
 import { removeWhiteBackground, compositeImage } from "@/lib/imageProcessing";
 import Link from "next/link";
-import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, ArrowLeft } from "lucide-react";
+import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, ArrowLeft, FolderOpen, Loader2, X } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
+
+const BATCH_SIZE = 5;
+const yieldToMain = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 
 interface ProcessedImage {
   id: string;
@@ -19,6 +22,7 @@ interface ProcessedImage {
   customScale?: number;
   customX?: number;
   customY?: number;
+  relativePath?: string;
 }
 
 export default function Home() {
@@ -32,6 +36,19 @@ export default function Home() {
   const [isProcessingAll, setIsProcessingAll] = useState(false);
   const [editingImageId, setEditingImageId] = useState<string | null>(null);
   const [zipFileName, setZipFileName] = useState("processed_images");
+
+  // ZIP progress state
+  const [zipProgress, setZipProgress] = useState<{
+    active: boolean;
+    currentFolder: string;
+    currentFile: string;
+    current: number;
+    total: number;
+  } | null>(null);
+
+  // Keep a ref to images for use in async closures that outlive renders
+  const imagesRef = useRef<ProcessedImage[]>([]);
+  useEffect(() => { imagesRef.current = images; }, [images]);
 
   // Apply custom placement to a specific image
   const handleCustomPlacement = (id: string, scale: number, x: number, y: number, reset: boolean = false) => {
@@ -81,6 +98,7 @@ export default function Home() {
 
   // File Input Refs
   const foregroundInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const backgroundInputRef = useRef<HTMLInputElement>(null);
 
   // Handle Foreground Images Upload
@@ -103,27 +121,83 @@ export default function Home() {
 
     setImages(prev => [...prev, ...newImages]);
 
-    // Process each image
-    for (const img of newImages) {
-      try {
-        const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance);
-        let compositedUrl = null;
-
-        if (bgImageUrl) {
-          compositedUrl = await compositeImage(transparentUrl, bgImageUrl, subjectScale, subjectX, subjectY);
+    // Process in batches to avoid memory exhaustion
+    for (let i = 0; i < newImages.length; i += BATCH_SIZE) {
+      const batch = newImages.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (img) => {
+        try {
+          const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance);
+          let compositedUrl = null;
+          if (bgImageUrl) {
+            compositedUrl = await compositeImage(transparentUrl, bgImageUrl, subjectScale, subjectX, subjectY);
+          }
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
+          ));
+        } catch (err) {
+          console.error("Error processing " + img.name, err);
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, status: "error" } : p
+          ));
         }
-
-        setImages(prev => prev.map(p =>
-          p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
-        ));
-      } catch (err) {
-        console.error("Error processing " + img.name, err);
-        setImages(prev => prev.map(p =>
-          p.id === img.id ? { ...p, status: "error" } : p
-        ));
-      }
+      }));
+      // Yield to main thread between batches so GC can run and UI stays responsive
+      await yieldToMain();
     }
     setIsProcessingAll(false);
+  };
+
+  // Handle Folder Upload (preserves subfolder structure via webkitdirectory)
+  const handleFolderUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files?.length) return;
+
+    setIsProcessingAll(true);
+    const files = Array.from(e.target.files).filter(f => f.type.startsWith("image/"));
+
+    // webkitRelativePath looks like "RootFolder/Subfolder/image.jpg"
+    // We strip the root folder name so relativePath = "Subfolder/image.jpg"
+    const newImages: ProcessedImage[] = files.map(file => {
+      const parts = file.webkitRelativePath.split("/");
+      const relativePath = parts.length > 1 ? parts.slice(1).join("/") : file.name;
+      return {
+        id: Math.random().toString(36).substring(7),
+        originalFile: file,
+        originalUrl: URL.createObjectURL(file),
+        transparentUrl: null,
+        compositedUrl: null,
+        name: file.name,
+        status: "processing" as const,
+        relativePath,
+      };
+    });
+
+    setImages(prev => [...prev, ...newImages]);
+
+    // Process in batches
+    for (let i = 0; i < newImages.length; i += BATCH_SIZE) {
+      const batch = newImages.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (img) => {
+        try {
+          const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance);
+          let compositedUrl = null;
+          if (bgImageUrl) {
+            compositedUrl = await compositeImage(transparentUrl, bgImageUrl, subjectScale, subjectX, subjectY);
+          }
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
+          ));
+        } catch (err) {
+          console.error("Error processing " + img.name, err);
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, status: "error" } : p
+          ));
+        }
+      }));
+      await yieldToMain();
+    }
+    setIsProcessingAll(false);
+    // Reset input so re-selecting the same folder triggers onChange
+    e.target.value = "";
   };
 
   // Handle Background Image Upload
@@ -135,17 +209,20 @@ export default function Home() {
     setBgImageFile(file);
     setBgImageUrl(url);
 
-    // Re-composite all finished transparent images
-    setImages(prev => prev.map(img => ({ ...img, status: img.status === "done" ? "processing" : img.status })));
+    // Use ref to get latest images (avoids stale closure)
+    const currentImages = imagesRef.current;
+    setImages(prev => prev.map(img => ({ ...img, status: img.transparentUrl ? "processing" : img.status })));
 
-    for (let i = 0; i < images.length; i++) {
-      const img = images[i];
-      if (img.transparentUrl) {
+    // Process in batches
+    const toProcess = currentImages.filter(img => img.transparentUrl);
+    for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
+      const batch = toProcess.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (img) => {
         try {
           const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
           const actX = img.customX !== undefined ? img.customX : subjectX;
           const actY = img.customY !== undefined ? img.customY : subjectY;
-          let compositedUrl = await compositeImage(img.transparentUrl, url, actScale, actX, actY);
+          const compositedUrl = await compositeImage(img.transparentUrl!, url, actScale, actX, actY);
           setImages(prev => prev.map(p =>
             p.id === img.id ? { ...p, compositedUrl, status: "done" } : p
           ));
@@ -154,7 +231,8 @@ export default function Home() {
             p.id === img.id ? { ...p, status: "done" } : p
           ));
         }
-      }
+      }));
+      await yieldToMain();
     }
   };
 
@@ -176,42 +254,65 @@ export default function Home() {
 
   const downloadAll = async () => {
     const zip = new JSZip();
-    const transparentFolder = zip.folder("Transparent_PNGs");
-    const compositedFolder = zip.folder("Final_Images");
+    const transparentFolder = zip.folder("Transparent_PNGs")!;
+    const compositedFolder = zip.folder("Final_Images")!;
 
-    for (const img of images) {
-      if (img.transparentUrl && transparentFolder) {
-        // Data URl to Blob
+    const total = images.length;
+    setZipProgress({ active: true, currentFolder: "", currentFile: "", current: 0, total });
+
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      const baseName = img.name.split('.')[0];
+      const subDir = img.relativePath
+        ? img.relativePath.substring(0, img.relativePath.lastIndexOf("/"))
+        : "";
+      const folderLabel = subDir || "Root";
+
+      setZipProgress({ active: true, currentFolder: folderLabel, currentFile: img.name, current: i + 1, total });
+
+      if (img.transparentUrl) {
         const response = await fetch(img.transparentUrl);
         const blob = await response.blob();
-        transparentFolder.file(`${img.name.split('.')[0]}_transparent.png`, blob);
+        const targetFolder = subDir ? transparentFolder.folder(subDir)! : transparentFolder;
+        targetFolder.file(`${baseName}_transparent.png`, blob);
       }
-      if (img.compositedUrl && compositedFolder) {
+      if (img.compositedUrl) {
         const response = await fetch(img.compositedUrl);
         const blob = await response.blob();
         const ext = blob.type === "image/png" ? "png" : "jpg";
-        compositedFolder.file(`${img.name.split('.')[0]}_final.${ext}`, blob);
+        const targetFolder = subDir ? compositedFolder.folder(subDir)! : compositedFolder;
+        targetFolder.file(`${baseName}_final.${ext}`, blob);
       }
+
+      // Yield every few files so the progress bar updates
+      if (i % 3 === 0) await yieldToMain();
     }
+
+    setZipProgress(prev => prev ? { ...prev, currentFile: "Compressing ZIP...", currentFolder: "" } : null);
+    await yieldToMain();
 
     const content = await zip.generateAsync({ type: "blob" });
     saveAs(content, `${zipFileName || "processed_images"}.zip`);
+    setZipProgress(null);
   };
 
   // Trigger re-composite when subject placement changes
   useEffect(() => {
     if (images.length === 0 || !bgImageUrl) return;
     const recomposite = async () => {
+      const currentImages = imagesRef.current;
       setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
-      for (const img of images) {
-        if (img.transparentUrl) {
+      const toProcess = currentImages.filter(img => img.transparentUrl);
+      for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
+        const batch = toProcess.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(async (img) => {
           try {
             let compositedUrl = null;
             if (bgImageUrl) {
               const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
               const actX = img.customX !== undefined ? img.customX : subjectX;
               const actY = img.customY !== undefined ? img.customY : subjectY;
-              compositedUrl = await compositeImage(img.transparentUrl, bgImageUrl, actScale, actX, actY);
+              compositedUrl = await compositeImage(img.transparentUrl!, bgImageUrl, actScale, actX, actY);
             }
             setImages(prev => prev.map(p =>
               p.id === img.id ? { ...p, compositedUrl, status: "done" } : p
@@ -221,7 +322,8 @@ export default function Home() {
               p.id === img.id ? { ...p, status: "error" } : p
             ));
           }
-        }
+        }));
+        await yieldToMain();
       }
     };
     const timeout = setTimeout(recomposite, 200);
@@ -233,30 +335,34 @@ export default function Home() {
     if (images.length === 0) return;
     const reprocess = async () => {
       setIsProcessingAll(true);
+      const currentImages = imagesRef.current;
       setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
-      for (const img of images) {
-        try {
-          const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance);
-          let compositedUrl = null;
-          if (bgImageUrl) {
-            const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
-            const actX = img.customX !== undefined ? img.customX : subjectX;
-            const actY = img.customY !== undefined ? img.customY : subjectY;
-            compositedUrl = await compositeImage(transparentUrl, bgImageUrl, actScale, actX, actY);
+      for (let i = 0; i < currentImages.length; i += BATCH_SIZE) {
+        const batch = currentImages.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(async (img) => {
+          try {
+            const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance);
+            let compositedUrl = null;
+            if (bgImageUrl) {
+              const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
+              const actX = img.customX !== undefined ? img.customX : subjectX;
+              const actY = img.customY !== undefined ? img.customY : subjectY;
+              compositedUrl = await compositeImage(transparentUrl, bgImageUrl, actScale, actX, actY);
+            }
+            setImages(prev => prev.map(p =>
+              p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
+            ));
+          } catch (e) {
+            setImages(prev => prev.map(p =>
+              p.id === img.id ? { ...p, status: "error" } : p
+            ));
           }
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
-          ));
-        } catch (e) {
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, status: "error" } : p
-          ));
-        }
+        }));
+        await yieldToMain();
       }
       setIsProcessingAll(false);
     };
 
-    // Debounce this simply by a short timeout
     const timeout = setTimeout(reprocess, 800);
     return () => clearTimeout(timeout);
   }, [tolerance]);
@@ -325,18 +431,34 @@ export default function Home() {
                 <FileImage className="w-5 h-5 text-accent" />
                 Source Intake
               </h3>
-              <div
-                onClick={() => foregroundInputRef.current?.click()}
-                className="group border border-dashed border-muted-foreground/30 bg-muted/5 rounded-[1.5rem] p-10 flex flex-col items-center justify-center text-center cursor-pointer hover:border-accent hover:bg-accent/5 transition-all duration-300"
-              >
-                <input
-                  ref={foregroundInputRef}
-                  type="file" multiple accept="image/*" className="hidden"
-                  onChange={handleForegroundUpload}
-                />
-                <Upload className="w-8 h-8 mb-4 text-muted-foreground group-hover:text-accent transition-colors" />
-                <p className="font-semibold text-foreground">Drop product images</p>
-                <p className="text-sm text-muted-foreground mt-2 font-medium">PNG, JPG</p>
+              <div className="grid grid-cols-1 gap-3">
+                <div
+                  onClick={() => foregroundInputRef.current?.click()}
+                  className="group border border-dashed border-muted-foreground/30 bg-muted/5 rounded-[1.5rem] p-8 flex flex-col items-center justify-center text-center cursor-pointer hover:border-accent hover:bg-accent/5 transition-all duration-300"
+                >
+                  <input
+                    ref={foregroundInputRef}
+                    type="file" multiple accept="image/*" className="hidden"
+                    onChange={handleForegroundUpload}
+                  />
+                  <Upload className="w-7 h-7 mb-3 text-muted-foreground group-hover:text-accent transition-colors" />
+                  <p className="font-semibold text-foreground text-sm">Upload Files</p>
+                  <p className="text-xs text-muted-foreground mt-1.5 font-medium">Select individual images</p>
+                </div>
+                <div
+                  onClick={() => folderInputRef.current?.click()}
+                  className="group border border-dashed border-muted-foreground/30 bg-muted/5 rounded-[1.5rem] p-8 flex flex-col items-center justify-center text-center cursor-pointer hover:border-accent hover:bg-accent/5 transition-all duration-300"
+                >
+                  <input
+                    ref={folderInputRef}
+                    type="file" accept="image/*" className="hidden"
+                    onChange={handleFolderUpload}
+                    {...{ webkitdirectory: "", directory: "" } as any}
+                  />
+                  <FolderOpen className="w-7 h-7 mb-3 text-muted-foreground group-hover:text-accent transition-colors" />
+                  <p className="font-semibold text-foreground text-sm">Upload Folder</p>
+                  <p className="text-xs text-muted-foreground mt-1.5 font-medium">Preserves subfolder structure in ZIP</p>
+                </div>
               </div>
             </div>
 
@@ -749,6 +871,61 @@ export default function Home() {
                   >
                     Save & Close
                   </button>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ZIP Progress Modal */}
+      <AnimatePresence>
+        {zipProgress && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-background/80 backdrop-blur-xl"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              className="w-full max-w-md liquid-glass rounded-[2rem] p-8 shadow-2xl"
+            >
+              <div className="flex items-center gap-4 mb-6">
+                <div className="w-12 h-12 rounded-full bg-accent/10 flex items-center justify-center">
+                  <Loader2 className="w-6 h-6 text-accent animate-spin" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-foreground">Creating ZIP</h3>
+                  <p className="text-sm text-muted-foreground">
+                    {zipProgress.current} / {zipProgress.total} files
+                  </p>
+                </div>
+              </div>
+
+              {/* Progress bar */}
+              <div className="w-full h-2 bg-border rounded-full overflow-hidden mb-5">
+                <motion.div
+                  className="h-full bg-accent rounded-full"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${zipProgress.total > 0 ? (zipProgress.current / zipProgress.total) * 100 : 0}%` }}
+                  transition={{ ease: "easeOut", duration: 0.3 }}
+                />
+              </div>
+
+              {/* Current file info */}
+              <div className="space-y-2 bg-muted/30 rounded-xl p-4 border border-border/50">
+                {zipProgress.currentFolder && (
+                  <div className="flex items-center gap-2">
+                    <FolderOpen className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                    <span className="text-sm font-medium text-foreground truncate">{zipProgress.currentFolder}</span>
+                  </div>
+                )}
+                <div className="flex items-center gap-2">
+                  <FileImage className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                  <span className="text-sm text-muted-foreground truncate">{zipProgress.currentFile}</span>
                 </div>
               </div>
             </motion.div>
