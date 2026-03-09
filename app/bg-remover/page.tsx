@@ -500,7 +500,7 @@ export default function Home() {
           <div className="flex flex-col md:flex-row items-start md:items-end justify-between gap-6">
             <div>
               <h1 className="text-4xl md:text-6xl font-extrabold tracking-tighter leading-none text-foreground mb-3">
-                Chroma<span className="text-muted-foreground/50 font-light">Clear</span>
+                Background<span className="text-muted-foreground/50 font-light">Remover</span>
               </h1>
               <p className="text-muted-foreground text-base md:text-lg max-w-[65ch] leading-relaxed">
                 Bulk background removal and high-performance compositing.

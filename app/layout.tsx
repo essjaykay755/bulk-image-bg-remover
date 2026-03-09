@@ -13,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "ChromaClear | Bulk BG Remover",
-  description: "Bulk remove white backgrounds from your product images and composite them locally.",
+  title: "Lumina | Professional Image Suite",
+  description: "Fast, bulk image processing directly in your browser.",
 };
 
 export default function RootLayout({
