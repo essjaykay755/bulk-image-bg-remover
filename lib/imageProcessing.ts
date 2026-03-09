@@ -131,7 +131,7 @@ export const compositeImage = async (
           } else {
             reject(new Error("Failed to create image blob"));
           }
-        }, "image/jpeg", 0.95);
+        }, "image/png");
       };
 
       fgImg.onerror = reject;
@@ -176,8 +176,14 @@ export const applyLogo = async (
 
         ctx.drawImage(logoImg, drawX, drawY, finalW, finalH);
 
-        const isPng = baseDataUrl.startsWith("data:image/png");
-        resolve(canvas.toDataURL(isPng ? "image/png" : "image/jpeg", 0.95));
+        // Use toBlob for memory efficiency — always output PNG for lossless quality
+        canvas.toBlob((blob) => {
+          if (blob) {
+            resolve(URL.createObjectURL(blob));
+          } else {
+            reject(new Error("Failed to create image blob"));
+          }
+        }, "image/png");
       };
 
       logoImg.onerror = reject;
@@ -297,7 +303,14 @@ export const applySelectiveBlur = async (
       }
 
       finalCtx.putImageData(finalImageData, 0, 0);
-      resolve(finalCanvas.toDataURL("image/jpeg", 0.95));
+      // Use toBlob for memory efficiency — output PNG for lossless quality
+      finalCanvas.toBlob((blob) => {
+        if (blob) {
+          resolve(URL.createObjectURL(blob));
+        } else {
+          reject(new Error("Failed to create image blob"));
+        }
+      }, "image/png");
     };
     img.onerror = reject;
     img.src = bgDataUrl;
@@ -506,7 +519,14 @@ export const applyAiWatermarkMask = async (bgDataUrl: string, options: AiMaskerO
         ctxFull.putImageData(imgData, safeX, safeY);
       }
 
-      resolve(fullCanvas.toDataURL("image/png"));
+      // Use toBlob for memory efficiency
+      fullCanvas.toBlob((blob) => {
+        if (blob) {
+          resolve(URL.createObjectURL(blob));
+        } else {
+          reject(new Error("Failed to create image blob"));
+        }
+      }, "image/png");
     };
     img.onerror = reject;
     img.src = bgDataUrl;

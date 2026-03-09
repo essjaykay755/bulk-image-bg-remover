@@ -3,10 +3,13 @@
 import { useState, useRef, useEffect } from "react";
 import { compositeImage, applyLogo, applySelectiveBlur, getPixelColor, applyAiWatermarkMask, runMaskerSolvers } from "@/lib/imageProcessing";
 import Link from "next/link";
-import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, Pipette, Zap, ArrowLeft } from "lucide-react";
+import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, Pipette, Zap, ArrowLeft, FolderOpen, Loader2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
+
+const BATCH_SIZE = 5;
+const yieldToMain = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 
 interface ProcessedImage {
   id: string;
@@ -18,6 +21,7 @@ interface ProcessedImage {
   customScale?: number;
   customX?: number;
   customY?: number;
+  relativePath?: string;
 }
 
 export default function Home() {
@@ -87,8 +91,30 @@ export default function Home() {
 
   // File Input Refs
   const foregroundInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const backgroundInputRef = useRef<HTMLInputElement>(null);
   const logoInputRef = useRef<HTMLInputElement>(null);
+
+  // Refs and progress state
+  const imagesRef = useRef<ProcessedImage[]>([]);
+  useEffect(() => { imagesRef.current = images; }, [images]);
+
+  const [batchProgress, setBatchProgress] = useState<{
+    label: string;
+    current: number;
+    total: number;
+    currentFile: string;
+  } | null>(null);
+
+  const [zipProgress, setZipProgress] = useState<{
+    active: boolean;
+    currentFolder: string;
+    currentFile: string;
+    current: number;
+    total: number;
+  } | null>(null);
+
+  const [zipFileName, setZipFileName] = useState("processed_images");
 
   // Handle Foreground Images Upload
   const handleForegroundUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -107,35 +133,107 @@ export default function Home() {
     }));
 
     setImages(prev => [...prev, ...newImages]);
+    const total = newImages.length;
+    setBatchProgress({ label: "Processing Images", current: 0, total, currentFile: "" });
+    let processed = 0;
 
-    for (const img of newImages) {
-      try {
-        const compositedUrl = await processImage(img.originalUrl);
-        setImages(prev => prev.map(p =>
-          p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
-        ));
-      } catch (err) {
-        console.error("Error processing " + img.name, err);
-        setImages(prev => prev.map(p =>
-          p.id === img.id ? { ...p, status: "error" } : p
-        ));
-      }
+    for (let i = 0; i < newImages.length; i += BATCH_SIZE) {
+      const batch = newImages.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (img) => {
+        try {
+          const compositedUrl = await processImage(img.originalUrl);
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
+          ));
+        } catch (err) {
+          console.error("Error processing " + img.name, err);
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, status: "error" } : p
+          ));
+        }
+        processed++;
+        setBatchProgress({ label: "Processing Images", current: processed, total, currentFile: img.name });
+      }));
+      await yieldToMain();
     }
+    setBatchProgress(null);
     setIsProcessingAll(false);
+  };
+
+  // Handle Folder Upload
+  const handleFolderUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (!e.target.files?.length) return;
+
+    setIsProcessingAll(true);
+    const files = Array.from(e.target.files).filter(f => f.type.startsWith("image/"));
+
+    const newImages: ProcessedImage[] = files.map(file => {
+      const parts = file.webkitRelativePath.split("/");
+      const relativePath = parts.length > 1 ? parts.slice(1).join("/") : file.name;
+      return {
+        id: Math.random().toString(36).substring(7),
+        originalFile: file,
+        originalUrl: URL.createObjectURL(file),
+        compositedUrl: null,
+        name: file.name,
+        status: "processing" as const,
+        relativePath,
+      };
+    });
+
+    setImages(prev => [...prev, ...newImages]);
+    const total = newImages.length;
+    setBatchProgress({ label: "Processing Images", current: 0, total, currentFile: "" });
+    let processed = 0;
+
+    for (let i = 0; i < newImages.length; i += BATCH_SIZE) {
+      const batch = newImages.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (img) => {
+        try {
+          const compositedUrl = await processImage(img.originalUrl);
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
+          ));
+        } catch (err) {
+          console.error("Error processing " + img.name, err);
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, status: "error" } : p
+          ));
+        }
+        processed++;
+        setBatchProgress({ label: "Processing Images", current: processed, total, currentFile: img.relativePath || img.name });
+      }));
+      await yieldToMain();
+    }
+    setBatchProgress(null);
+    setIsProcessingAll(false);
+    e.target.value = "";
   };
 
   const clearLogo = async () => {
     setLogoFile(null);
     setLogoUrl(null);
+    const currentImages = imagesRef.current;
+    const total = currentImages.length;
+    if (total === 0) return;
+    setBatchProgress({ label: "Removing Logo", current: 0, total, currentFile: "" });
     setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
-    for (const img of images) {
-      try {
-        const compositedUrl = await processImage(img.originalUrl, null);
-        setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p));
-      } catch (e) {
-        setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
-      }
+    let processed = 0;
+    for (let i = 0; i < currentImages.length; i += BATCH_SIZE) {
+      const batch = currentImages.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (img) => {
+        try {
+          const compositedUrl = await processImage(img.originalUrl, null);
+          setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p));
+        } catch (e) {
+          setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
+        }
+        processed++;
+        setBatchProgress({ label: "Removing Logo", current: processed, total, currentFile: img.name });
+      }));
+      await yieldToMain();
     }
+    setBatchProgress(null);
   };
 
   // Handle Logo Upload
@@ -146,51 +244,87 @@ export default function Home() {
     setLogoFile(file);
     setLogoUrl(url);
 
+    const currentImages = imagesRef.current;
+    const total = currentImages.length;
+    if (total === 0) return;
+    setBatchProgress({ label: "Applying Logo", current: 0, total, currentFile: "" });
     setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
-    for (const img of images) {
-      try {
-        const compositedUrl = await processImage(img.originalUrl, url);
-        setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p));
-      } catch (error) {
-        setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
-      }
+    let processed = 0;
+    for (let i = 0; i < currentImages.length; i += BATCH_SIZE) {
+      const batch = currentImages.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (img) => {
+        try {
+          const compositedUrl = await processImage(img.originalUrl, url);
+          setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p));
+        } catch (error) {
+          setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
+        }
+        processed++;
+        setBatchProgress({ label: "Applying Logo", current: processed, total, currentFile: img.name });
+      }));
+      await yieldToMain();
     }
+    setBatchProgress(null);
   };
 
   const downloadAll = async () => {
     const zip = new JSZip();
-    const compositedFolder = zip.folder("Final_Images");
+    const compositedFolder = zip.folder("Final_Images")!;
 
-    for (const img of images) {
+    const total = images.length;
+    setZipProgress({ active: true, currentFolder: "", currentFile: "", current: 0, total });
+
+    for (let i = 0; i < images.length; i++) {
+      const img = images[i];
+      const baseName = img.name.split('.')[0];
+      const subDir = img.relativePath
+        ? img.relativePath.substring(0, img.relativePath.lastIndexOf("/"))
+        : "";
+      const folderLabel = subDir || "Root";
+
+      setZipProgress({ active: true, currentFolder: folderLabel, currentFile: img.name, current: i + 1, total });
+
       const targetUrl = img.compositedUrl || img.originalUrl;
-      if (targetUrl && compositedFolder) {
+      if (targetUrl) {
         const response = await fetch(targetUrl);
         const blob = await response.blob();
         const ext = blob.type === "image/png" ? "png" : "jpg";
-        compositedFolder.file(`${img.name.split('.')[0]}_final.${ext}`, blob);
+        const targetFolder = subDir ? compositedFolder.folder(subDir)! : compositedFolder;
+        targetFolder.file(`${baseName}_final.${ext}`, blob);
       }
+
+      if (i % 3 === 0) await yieldToMain();
     }
 
+    setZipProgress(prev => prev ? { ...prev, currentFile: "Compressing ZIP...", currentFolder: "" } : null);
+    await yieldToMain();
+
     const content = await zip.generateAsync({ type: "blob" });
-    saveAs(content, "processed_images.zip");
+    saveAs(content, `${zipFileName || "processed_images"}.zip`);
+    setZipProgress(null);
   };
 
   // Trigger re-composite when settings change
   useEffect(() => {
     if (images.length === 0) return;
     const recomposite = async () => {
+      const currentImages = imagesRef.current;
       setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
-      for (const img of images) {
-        try {
-          const compositedUrl = await processImage(img.originalUrl);
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
-          ));
-        } catch (e) {
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, status: "error" } : p
-          ));
-        }
+      for (let i = 0; i < currentImages.length; i += BATCH_SIZE) {
+        const batch = currentImages.slice(i, i + BATCH_SIZE);
+        await Promise.all(batch.map(async (img) => {
+          try {
+            const compositedUrl = await processImage(img.originalUrl);
+            setImages(prev => prev.map(p =>
+              p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
+            ));
+          } catch (e) {
+            setImages(prev => prev.map(p =>
+              p.id === img.id ? { ...p, status: "error" } : p
+            ));
+          }
+        }));
+        await yieldToMain();
       }
     };
     const timeout = setTimeout(recomposite, 200);
@@ -281,24 +415,39 @@ export default function Home() {
           {/* Left Sidebar - Controls */}
           <aside className="xl:col-span-1 space-y-6">
 
-            {/* Foreground Upload */}
             <div className="liquid-glass p-8 rounded-[2.5rem] transition-all">
               <h3 className="text-lg font-bold flex items-center gap-3 mb-6 text-foreground">
                 <FileImage className="w-5 h-5 text-accent" />
                 Source Intake
               </h3>
-              <div
-                onClick={() => foregroundInputRef.current?.click()}
-                className="group border border-dashed border-muted-foreground/30 bg-muted/5 rounded-[1.5rem] p-10 flex flex-col items-center justify-center text-center cursor-pointer hover:border-accent hover:bg-accent/5 transition-all duration-300"
-              >
-                <input
-                  ref={foregroundInputRef}
-                  type="file" multiple accept="image/*" className="hidden"
-                  onChange={handleForegroundUpload}
-                />
-                <Upload className="w-8 h-8 mb-4 text-muted-foreground group-hover:text-accent transition-colors" />
-                <p className="font-semibold text-foreground">Drop product images</p>
-                <p className="text-sm text-muted-foreground mt-2 font-medium">PNG, JPG</p>
+              <div className="grid grid-cols-1 gap-3">
+                <div
+                  onClick={() => foregroundInputRef.current?.click()}
+                  className="group border border-dashed border-muted-foreground/30 bg-muted/5 rounded-[1.5rem] p-8 flex flex-col items-center justify-center text-center cursor-pointer hover:border-accent hover:bg-accent/5 transition-all duration-300"
+                >
+                  <input
+                    ref={foregroundInputRef}
+                    type="file" multiple accept="image/*" className="hidden"
+                    onChange={handleForegroundUpload}
+                  />
+                  <Upload className="w-7 h-7 mb-3 text-muted-foreground group-hover:text-accent transition-colors" />
+                  <p className="font-semibold text-foreground text-sm">Upload Files</p>
+                  <p className="text-xs text-muted-foreground mt-1.5 font-medium">Select individual images</p>
+                </div>
+                <div
+                  onClick={() => folderInputRef.current?.click()}
+                  className="group border border-dashed border-muted-foreground/30 bg-muted/5 rounded-[1.5rem] p-8 flex flex-col items-center justify-center text-center cursor-pointer hover:border-accent hover:bg-accent/5 transition-all duration-300"
+                >
+                  <input
+                    ref={folderInputRef}
+                    type="file" accept="image/*" className="hidden"
+                    onChange={handleFolderUpload}
+                    {...{ webkitdirectory: "", directory: "" } as any}
+                  />
+                  <FolderOpen className="w-7 h-7 mb-3 text-muted-foreground group-hover:text-accent transition-colors" />
+                  <p className="font-semibold text-foreground text-sm">Upload Folder</p>
+                  <p className="text-xs text-muted-foreground mt-1.5 font-medium">Preserves subfolder structure in ZIP</p>
+                </div>
               </div>
             </div>
 
@@ -734,6 +883,100 @@ export default function Home() {
           )
         }
       </AnimatePresence >
+
+      {/* Batch Processing Progress Modal */}
+      <AnimatePresence>
+        {batchProgress && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-background/80 backdrop-blur-xl"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              className="w-full max-w-md liquid-glass rounded-[2rem] p-8 shadow-2xl"
+            >
+              <div className="flex items-center gap-4 mb-6">
+                <div className="w-12 h-12 rounded-full bg-accent/10 flex items-center justify-center">
+                  <Loader2 className="w-6 h-6 text-accent animate-spin" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-foreground">{batchProgress.label}</h3>
+                  <p className="text-sm text-muted-foreground">
+                    {batchProgress.current} / {batchProgress.total} images
+                  </p>
+                </div>
+              </div>
+              <div className="w-full h-2 bg-border rounded-full overflow-hidden mb-5">
+                <motion.div
+                  className="h-full bg-accent rounded-full"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${batchProgress.total > 0 ? (batchProgress.current / batchProgress.total) * 100 : 0}%` }}
+                  transition={{ ease: "easeOut", duration: 0.3 }}
+                />
+              </div>
+              <div className="flex items-center gap-2 bg-muted/30 rounded-xl p-4 border border-border/50">
+                <FileImage className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                <span className="text-sm text-muted-foreground truncate">{batchProgress.currentFile}</span>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* ZIP Progress Modal */}
+      <AnimatePresence>
+        {zipProgress && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-[60] flex items-center justify-center p-4 bg-background/80 backdrop-blur-xl"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 20 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 20 }}
+              className="w-full max-w-md liquid-glass rounded-[2rem] p-8 shadow-2xl"
+            >
+              <div className="flex items-center gap-4 mb-6">
+                <div className="w-12 h-12 rounded-full bg-accent/10 flex items-center justify-center">
+                  <Loader2 className="w-6 h-6 text-accent animate-spin" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-bold text-foreground">Creating ZIP</h3>
+                  <p className="text-sm text-muted-foreground">
+                    {zipProgress.current} / {zipProgress.total} files
+                  </p>
+                </div>
+              </div>
+              <div className="w-full h-2 bg-border rounded-full overflow-hidden mb-5">
+                <motion.div
+                  className="h-full bg-accent rounded-full"
+                  initial={{ width: 0 }}
+                  animate={{ width: `${zipProgress.total > 0 ? (zipProgress.current / zipProgress.total) * 100 : 0}%` }}
+                  transition={{ ease: "easeOut", duration: 0.3 }}
+                />
+              </div>
+              <div className="space-y-2 bg-muted/30 rounded-xl p-4 border border-border/50">
+                {zipProgress.currentFolder && (
+                  <div className="flex items-center gap-2">
+                    <FolderOpen className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                    <span className="text-sm font-medium text-foreground truncate">{zipProgress.currentFolder}</span>
+                  </div>
+                )}
+                <div className="flex items-center gap-2">
+                  <FileImage className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+                  <span className="text-sm text-muted-foreground truncate">{zipProgress.currentFile}</span>
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div >
   );
 }
