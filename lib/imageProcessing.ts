@@ -1,4 +1,20 @@
-export const removeWhiteBackground = async (imageFile: File, tolerance: number = 20): Promise<string> => {
+import { removeBackground } from "@imgly/background-removal";
+
+export type BgRemovalMode = "ai" | "threshold";
+
+/** Uses @imgly AI model - great for complex/non-white backgrounds */
+const removeBackgroundAI = async (imageFile: File): Promise<string> => {
+  const resultBlob = await removeBackground(imageFile, {
+    publicPath: "https://staticimgly.com/@imgly/background-removal/1.7.0/dist/",
+    model: "isnet",
+  });
+  return URL.createObjectURL(resultBlob);
+};
+
+/** White-threshold background removal for studio shots on near-white backdrops.
+ *  Removes only near-white pixels connected to the image border,
+ *  helping preserve white details inside the subject. */
+const removeBackgroundThreshold = (imageFile: File, tolerance: number): Promise<string> => {
   return new Promise((resolve, reject) => {
     const img = new Image();
     const url = URL.createObjectURL(imageFile);
@@ -8,63 +24,106 @@ export const removeWhiteBackground = async (imageFile: File, tolerance: number =
       canvas.width = img.width;
       canvas.height = img.height;
       const ctx = canvas.getContext("2d");
-
-      if (!ctx) {
-        reject(new Error("Failed to get canvas context"));
-        return;
-      }
+      if (!ctx) { reject(new Error("Failed to get canvas context")); return; }
 
       ctx.drawImage(img, 0, 0);
       const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       const data = imageData.data;
+      const width = canvas.width;
+      const height = canvas.height;
+      const pixelCount = width * height;
+      const clampedTolerance = Math.max(0, Math.min(100, tolerance));
+      const maxDist = clampedTolerance * 2;
 
-      // Loop over every pixel (4 values: R, G, B, A)
-      for (let i = 0; i < data.length; i += 4) {
-        const r = data[i];
-        const g = data[i + 1];
-        const b = data[i + 2];
+      const nearWhite = new Uint8Array(pixelCount);
+      const connectedToBorder = new Uint8Array(pixelCount);
+      const whiteDistance = new Float32Array(pixelCount);
+      const queue = new Uint32Array(pixelCount);
 
-        // Calculate distance from pure white (255, 255, 255)
-        const diffR = 255 - r;
-        const diffG = 255 - g;
-        const diffB = 255 - b;
-        const distance = Math.sqrt(diffR * diffR + diffG * diffG + diffB * diffB);
-
-        // We map the 0-100 tolerance input to a max color distance (0-200)
-        // A distance of 100 means colors up to (197, 197, 197) are affected.
-        const maxDist = tolerance * 2;
-
+      for (let px = 0; px < pixelCount; px++) {
+        const i = px * 4;
+        const dR = 255 - data[i];
+        const dG = 255 - data[i + 1];
+        const dB = 255 - data[i + 2];
+        const distance = Math.sqrt(dR * dR + dG * dG + dB * dB);
+        whiteDistance[px] = distance;
         if (distance <= maxDist) {
-          if (maxDist === 0 && distance === 0) {
-            data[i + 3] = 0;
-          } else if (maxDist > 0) {
-            const ratio = distance / maxDist;
-            // Quadratic feathering for smoother edges
-            data[i + 3] = 255 * (ratio * ratio);
-          }
+          nearWhite[px] = 1;
         }
       }
 
+      let head = 0;
+      let tail = 0;
+      const enqueue = (x: number, y: number) => {
+        if (x < 0 || x >= width || y < 0 || y >= height) return;
+        const idx = y * width + x;
+        if (!nearWhite[idx] || connectedToBorder[idx]) return;
+        connectedToBorder[idx] = 1;
+        queue[tail++] = idx;
+      };
+
+      for (let x = 0; x < width; x++) {
+        enqueue(x, 0);
+        enqueue(x, height - 1);
+      }
+      for (let y = 0; y < height; y++) {
+        enqueue(0, y);
+        enqueue(width - 1, y);
+      }
+
+      while (head < tail) {
+        const idx = queue[head++];
+        const x = idx % width;
+        const y = Math.floor(idx / width);
+
+        enqueue(x - 1, y);
+        enqueue(x + 1, y);
+        enqueue(x, y - 1);
+        enqueue(x, y + 1);
+        enqueue(x - 1, y - 1);
+        enqueue(x + 1, y - 1);
+        enqueue(x - 1, y + 1);
+        enqueue(x + 1, y + 1);
+      }
+
+      for (let px = 0; px < pixelCount; px++) {
+        if (!connectedToBorder[px]) continue;
+        const i = px * 4;
+        const distance = whiteDistance[px];
+        data[i + 3] = maxDist === 0
+          ? 0
+          : Math.round(255 * Math.pow(distance / maxDist, 2));
+      }
+
       ctx.putImageData(imageData, 0, 0);
-      // Use toBlob instead of toDataURL to avoid massive base64 strings in JS heap
       canvas.toBlob((blob) => {
-        if (blob) {
-          resolve(URL.createObjectURL(blob));
-        } else {
-          reject(new Error("Failed to create image blob"));
-        }
+        if (blob) resolve(URL.createObjectURL(blob));
+        else reject(new Error("Failed to create image blob"));
         URL.revokeObjectURL(url);
       }, "image/png");
     };
 
-    img.onerror = () => {
-      reject(new Error("Failed to load image for processing"));
-      URL.revokeObjectURL(url);
-    };
-
+    img.onerror = () => { reject(new Error("Failed to load image")); URL.revokeObjectURL(url); };
     img.src = url;
   });
 };
+export const removeWhiteBackground = async (
+  imageFile: File,
+  tolerance: number = 20,
+  mode: BgRemovalMode = "ai"
+): Promise<string> => {
+  if (mode === "threshold") {
+    return removeBackgroundThreshold(imageFile, tolerance);
+  }
+  try {
+    return await removeBackgroundAI(imageFile);
+  } catch (error) {
+    console.error("AI background removal failed, falling back to threshold:", error);
+    return removeBackgroundThreshold(imageFile, tolerance);
+  }
+};
+
+
 
 export const compositeImage = async (
   foregroundDataUrl: string,
@@ -176,7 +235,7 @@ export const applyLogo = async (
 
         ctx.drawImage(logoImg, drawX, drawY, finalW, finalH);
 
-        // Use toBlob for memory efficiency — always output PNG for lossless quality
+        // Use toBlob for memory efficiency â€” always output PNG for lossless quality
         canvas.toBlob((blob) => {
           if (blob) {
             resolve(URL.createObjectURL(blob));
@@ -303,7 +362,7 @@ export const applySelectiveBlur = async (
       }
 
       finalCtx.putImageData(finalImageData, 0, 0);
-      // Use toBlob for memory efficiency — output PNG for lossless quality
+      // Use toBlob for memory efficiency â€” output PNG for lossless quality
       finalCanvas.toBlob((blob) => {
         if (blob) {
           resolve(URL.createObjectURL(blob));
@@ -840,3 +899,5 @@ export const runMaskerSolvers = async (bgDataUrl: string): Promise<MaskerSolverR
     img.src = bgDataUrl;
   });
 };
+
+

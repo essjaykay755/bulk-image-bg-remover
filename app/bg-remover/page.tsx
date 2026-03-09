@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { removeWhiteBackground, compositeImage } from "@/lib/imageProcessing";
+import { removeWhiteBackground, compositeImage, BgRemovalMode } from "@/lib/imageProcessing";
 import Link from "next/link";
 import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, ArrowLeft, FolderOpen, Loader2, X, CheckSquare, Square } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -36,6 +36,7 @@ export default function Home() {
   const [isProcessingAll, setIsProcessingAll] = useState(false);
   const [editingImageId, setEditingImageId] = useState<string | null>(null);
   const [zipFileName, setZipFileName] = useState("processed_images");
+  const [bgRemovalMode, setBgRemovalMode] = useState<BgRemovalMode>("ai");
 
   // ZIP progress state
   const [zipProgress, setZipProgress] = useState<{
@@ -144,30 +145,27 @@ export default function Home() {
     setImages(prev => [...prev, ...newImages]);
     const total = newImages.length;
     setBatchProgress({ label: "Removing Backgrounds", current: 0, total, currentFile: "" });
-    let processed = 0;
 
-    for (let i = 0; i < newImages.length; i += BATCH_SIZE) {
-      const batch = newImages.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (img) => {
-        try {
-          const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance);
-          let compositedUrl = null;
-          if (bgImageUrl) {
-            compositedUrl = await compositeImage(transparentUrl, bgImageUrl, subjectScale, subjectX, subjectY);
-          }
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
-          ));
-        } catch (err) {
-          console.error("Error processing " + img.name, err);
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, status: "error" } : p
-          ));
-        }
-        processed++;
-        setBatchProgress({ label: "Removing Backgrounds", current: processed, total, currentFile: img.name });
-      }));
+    for (let i = 0; i < newImages.length; i++) {
+      const img = newImages[i];
+      setBatchProgress({ label: "Removing Backgrounds", current: i, total, currentFile: img.name });
       await yieldToMain();
+      try {
+        const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance, bgRemovalMode);
+        let compositedUrl = null;
+        if (bgImageUrl) {
+          compositedUrl = await compositeImage(transparentUrl, bgImageUrl, subjectScale, subjectX, subjectY);
+        }
+        setImages(prev => prev.map(p =>
+          p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
+        ));
+      } catch (err) {
+        console.error("Error processing " + img.name, err);
+        setImages(prev => prev.map(p =>
+          p.id === img.id ? { ...p, status: "error" } : p
+        ));
+      }
+      setBatchProgress({ label: "Removing Backgrounds", current: i + 1, total, currentFile: img.name });
     }
     setBatchProgress(null);
     setIsProcessingAll(false);
@@ -200,31 +198,27 @@ export default function Home() {
     setImages(prev => [...prev, ...newImages]);
     const total = newImages.length;
     setBatchProgress({ label: "Removing Backgrounds", current: 0, total, currentFile: "" });
-    let processed = 0;
 
-    // Process in batches
-    for (let i = 0; i < newImages.length; i += BATCH_SIZE) {
-      const batch = newImages.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (img) => {
-        try {
-          const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance);
-          let compositedUrl = null;
-          if (bgImageUrl) {
-            compositedUrl = await compositeImage(transparentUrl, bgImageUrl, subjectScale, subjectX, subjectY);
-          }
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
-          ));
-        } catch (err) {
-          console.error("Error processing " + img.name, err);
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, status: "error" } : p
-          ));
-        }
-        processed++;
-        setBatchProgress({ label: "Removing Backgrounds", current: processed, total, currentFile: img.relativePath || img.name });
-      }));
+    for (let i = 0; i < newImages.length; i++) {
+      const img = newImages[i];
+      setBatchProgress({ label: "Removing Backgrounds", current: i, total, currentFile: img.relativePath || img.name });
       await yieldToMain();
+      try {
+        const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance, bgRemovalMode);
+        let compositedUrl = null;
+        if (bgImageUrl) {
+          compositedUrl = await compositeImage(transparentUrl, bgImageUrl, subjectScale, subjectX, subjectY);
+        }
+        setImages(prev => prev.map(p =>
+          p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
+        ));
+      } catch (err) {
+        console.error("Error processing " + img.name, err);
+        setImages(prev => prev.map(p =>
+          p.id === img.id ? { ...p, status: "error" } : p
+        ));
+      }
+      setBatchProgress({ label: "Removing Backgrounds", current: i + 1, total, currentFile: img.relativePath || img.name });
     }
     setBatchProgress(null);
     setIsProcessingAll(false);
@@ -459,7 +453,7 @@ export default function Home() {
         const batch = currentImages.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(async (img) => {
           try {
-            const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance);
+            const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance, bgRemovalMode);
             let compositedUrl = null;
             if (bgImageUrl) {
               const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
@@ -483,7 +477,7 @@ export default function Home() {
 
     const timeout = setTimeout(reprocess, 800);
     return () => clearTimeout(timeout);
-  }, [tolerance]);
+  }, [tolerance, bgRemovalMode]);
 
   return (
     <div className="min-h-[100dvh] bg-background text-foreground font-sans selection:bg-accent/30 selection:text-accent-foreground p-6 sm:p-8 md:p-12 transition-colors duration-500">
@@ -635,23 +629,56 @@ export default function Home() {
               </h3>
 
               <div className="space-y-8">
+                {/* Engine Mode Toggle */}
                 <div>
-                  <div className="flex justify-between items-center mb-4">
-                    <label className="text-sm font-semibold text-foreground flex items-center gap-2">
-                      <SlidersHorizontal className="w-4 h-4 text-muted-foreground" />
-                      White Threshold
-                    </label>
-                    <span className="text-xs font-mono bg-muted/50 text-muted-foreground px-2 py-1 rounded border border-border">{tolerance}</span>
+                  <label className="text-sm font-semibold text-foreground block mb-3">Removal Engine</label>
+                  <div className="flex gap-2 p-1 bg-muted/30 rounded-xl border border-border/50">
+                    <button
+                      onClick={() => setBgRemovalMode("threshold")}
+                      className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-all ${bgRemovalMode === "threshold"
+                        ? "bg-foreground text-background shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                        }`}
+                    >
+                      White BG
+                    </button>
+                    <button
+                      onClick={() => setBgRemovalMode("ai")}
+                      className={`flex-1 py-2 px-3 rounded-lg text-xs font-semibold transition-all ${bgRemovalMode === "ai"
+                        ? "bg-foreground text-background shadow-sm"
+                        : "text-muted-foreground hover:text-foreground"
+                        }`}
+                    >
+                      AI (General)
+                    </button>
                   </div>
-                  <input
-                    type="range" min="0" max="100" value={tolerance}
-                    onChange={(e) => setTolerance(parseInt(e.target.value))}
-                    className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
-                  />
-                  <p className="text-xs text-muted-foreground mt-3 font-medium leading-relaxed">
-                    Controls the Euclidean distance cutoff for the alpha mask.
+                  <p className="text-xs text-muted-foreground mt-2 leading-relaxed">
+                    {bgRemovalMode === "threshold"
+                      ? "Removes white backgrounds only. Best for studio product shots — preserves white details inside the product."
+                      : "AI-powered segmentation. Best for complex or non-white backgrounds."}
                   </p>
                 </div>
+
+                {/* White Threshold slider hidden as @imgly handles this automatically */}
+                {bgRemovalMode === "threshold" && (
+                  <div>
+                    <div className="flex justify-between items-center mb-4">
+                      <label className="text-sm font-semibold text-foreground flex items-center gap-2">
+                        <SlidersHorizontal className="w-4 h-4 text-muted-foreground" />
+                        White Threshold
+                      </label>
+                      <span className="text-xs font-mono bg-muted/50 text-muted-foreground px-2 py-1 rounded border border-border">{tolerance}</span>
+                    </div>
+                    <input
+                      type="range" min="0" max="100" value={tolerance}
+                      onChange={(e) => setTolerance(parseInt(e.target.value))}
+                      className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-accent"
+                    />
+                    <p className="text-xs text-muted-foreground mt-3 font-medium leading-relaxed">
+                      Controls the Euclidean distance cutoff for the alpha mask.
+                    </p>
+                  </div>
+                )}
 
                 {bgImageUrl && (
                   <div className="pt-6 mt-6 border-t border-border/50 space-y-5">
@@ -1145,3 +1172,4 @@ export default function Home() {
     </div>
   );
 }
+
