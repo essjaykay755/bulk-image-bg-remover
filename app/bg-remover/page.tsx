@@ -308,10 +308,22 @@ export default function Home() {
         const targetFolder = subDir ? transparentFolder.folder(subDir)! : transparentFolder;
         targetFolder.file(`${baseName}_transparent.png`, blob);
       }
-      if (img.compositedUrl) {
-        const response = await fetch(img.compositedUrl);
+      const targetUrl = img.compositedUrl || img.transparentUrl;
+      if (targetUrl) {
+        const response = await fetch(targetUrl);
         const blob = await response.blob();
-        const ext = blob.type === "image/png" ? "png" : "jpg";
+        
+        let ext = "jpg";
+        if (blob.type === "image/png") ext = "png";
+        else if (blob.type === "image/webp") ext = "webp";
+        else if (blob.type === "image/jpeg") ext = "jpg";
+        else if (blob.type === "image/heic") ext = "heic";
+        else {
+          // Fallback to original file extension if we don't know the blob type
+          const origExt = img.name.split('.').pop()?.toLowerCase() || "jpg";
+          ext = origExt;
+        }
+
         const targetFolder = subDir ? compositedFolder.folder(subDir)! : compositedFolder;
         targetFolder.file(`${baseName}_final.${ext}`, blob);
       }
