@@ -52,6 +52,8 @@ export default function AIRetouchPage() {
         total: number;
     } | null>(null);
 
+    const [zipFileName, setZipFileName] = useState("ai_retouched_images");
+
     // Handle Foreground Images Upload (NO auto-processing)
     const handleForegroundUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         if (!e.target.files?.length) return;
@@ -244,7 +246,7 @@ export default function AIRetouchPage() {
         await yieldToMain();
 
         const content = await zip.generateAsync({ type: "blob" });
-        saveAs(content, "ai_retouched_images.zip");
+        saveAs(content, `${zipFileName || "ai_retouched_images"}.zip`);
         setZipProgress(null);
     };
 
@@ -299,17 +301,26 @@ export default function AIRetouchPage() {
                             )}
 
                             {doneCount > 0 && (
-                                <motion.button
-                                    whileHover={{ scale: 1.02 }}
-                                    whileTap={{ scale: 0.98 }}
-                                    initial={{ opacity: 0, y: 10 }}
-                                    animate={{ opacity: 1, y: 0 }}
-                                    onClick={downloadAll}
-                                    className="group flex items-center gap-3 px-8 py-3.5 bg-foreground text-background rounded-full font-semibold shadow-xl hover:shadow-2xl transition-all"
-                                >
-                                    <Download className="w-5 h-5 group-hover:translate-y-0.5 transition-transform" />
-                                    Export ZIP
-                                </motion.button>
+                                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                                    <input
+                                        type="text"
+                                        value={zipFileName}
+                                        onChange={(e) => setZipFileName(e.target.value)}
+                                        placeholder="Custom ZIP Name"
+                                        className="px-6 py-3.5 bg-background border border-border rounded-full text-sm font-medium focus:outline-accent focus:ring-2 focus:ring-accent/20 min-w-[200px]"
+                                    />
+                                    <motion.button
+                                        whileHover={{ scale: 1.02 }}
+                                        whileTap={{ scale: 0.98 }}
+                                        initial={{ opacity: 0, y: 10 }}
+                                        animate={{ opacity: 1, y: 0 }}
+                                        onClick={downloadAll}
+                                        className="group flex items-center gap-3 px-8 py-3.5 bg-foreground text-background rounded-full font-semibold shadow-xl hover:shadow-2xl transition-all"
+                                    >
+                                        <Download className="w-5 h-5 group-hover:translate-y-0.5 transition-transform" />
+                                        Export ZIP
+                                    </motion.button>
+                                </div>
                             )}
                         </div>
                     </div>
