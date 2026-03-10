@@ -22,6 +22,7 @@ interface ProcessedImage {
   customX?: number;
   customY?: number;
   relativePath?: string;
+  psUrl?: string | null;
 }
 
 export default function Home() {
@@ -65,52 +66,61 @@ export default function Home() {
       alpha: maskerAlpha, scale: maskerScale, x: maskerX, y: maskerY,
       boldness: maskerBold, blur: maskerBlur, seam: maskerSeam,
       decay: maskerDecay, linearMath: maskerLinear
-    }
-  ): Promise<string> => {
+    },
+    cachedPsUrl: string | null = null
+  ): Promise<{ url: string, newPsUrl: string | null }> => {
     let resultUrl = imgUrl;
 
     if (currentMaskerOn) {
       resultUrl = await applyAiWatermarkMask(resultUrl, currentMaskerOpts);
     }
     
+    let newPsUrl = cachedPsUrl;
+
     if (currentBlurOn) {
-        // Fetch to base64
-        const response = await fetch(resultUrl);
-        const blob = await response.blob();
-        const reader = new FileReader();
-        const base64Promise = new Promise<string>((resolve) => {
-            reader.onloadend = () => {
-                const b64 = reader.result as string;
-                resolve(b64.split(",")[1]);
-            };
-        });
-        reader.readAsDataURL(blob);
-        const imageBase64 = await base64Promise;
+        if (cachedPsUrl) {
+            resultUrl = cachedPsUrl;
+        } else {
+            // Fetch to base64
+            const response = await fetch(resultUrl);
+            const blob = await response.blob();
+            const reader = new FileReader();
+            const base64Promise = new Promise<string>((resolve) => {
+                reader.onloadend = () => {
+                    const b64 = reader.result as string;
+                    resolve(b64.split(",")[1]);
+                };
+            });
+            reader.readAsDataURL(blob);
+            const imageBase64 = await base64Promise;
 
-        const psResponse = await fetch("/api/run-ps", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                imageBase64,
-                mimeType: blob.type || "image/png",
-            }),
-        });
+            const psResponse = await fetch("/api/run-ps", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    imageBase64,
+                    mimeType: blob.type || "image/png",
+                }),
+            });
 
-        if (!psResponse.ok) {
-            const err = await psResponse.json();
-            throw new Error(err.error || `HTTP ${psResponse.status}`);
+            if (!psResponse.ok) {
+                const err = await psResponse.json();
+                throw new Error(err.error || `HTTP ${psResponse.status}`);
+            }
+
+            const data = await psResponse.json();
+            const psBlob = await fetch(`data:${data.mimeType};base64,${data.imageBase64}`).then(r => r.blob());
+            const freshlyProcessed = URL.createObjectURL(psBlob);
+            resultUrl = freshlyProcessed;
+            newPsUrl = freshlyProcessed;
         }
-
-        const data = await psResponse.json();
-        const psBlob = await fetch(`data:${data.mimeType};base64,${data.imageBase64}`).then(r => r.blob());
-        resultUrl = URL.createObjectURL(psBlob);
     }
 
     if (currentLogoUrl) {
       resultUrl = await applyLogo(resultUrl, currentLogoUrl, currentLogoScale, currentLogoX, currentLogoY);
     }
 
-    return resultUrl;
+    return { url: resultUrl, newPsUrl };
   };
 
   // File Input Refs
@@ -122,6 +132,9 @@ export default function Home() {
   // Refs and progress state
   const imagesRef = useRef<ProcessedImage[]>([]);
   useEffect(() => { imagesRef.current = images; }, [images]);
+
+  // Mutex: prevents recomposite from running while a batch upload/logo operation is active
+  const isProcessingRef = useRef(false);
 
   const [batchProgress, setBatchProgress] = useState<{
     label: string;
@@ -145,6 +158,7 @@ export default function Home() {
     if (!e.target.files?.length) return;
 
     setIsProcessingAll(true);
+    isProcessingRef.current = true;
     const files = Array.from(e.target.files);
 
     const newImages: ProcessedImage[] = files.map(file => ({
@@ -161,26 +175,26 @@ export default function Home() {
     setBatchProgress({ label: "Processing Images", current: 0, total, currentFile: "" });
     let processed = 0;
 
-    for (let i = 0; i < newImages.length; i += BATCH_SIZE) {
-      const batch = newImages.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (img) => {
-        try {
-          const compositedUrl = await processImage(img.originalUrl);
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
-          ));
-        } catch (err) {
-          console.error("Error processing " + img.name, err);
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, status: "error" } : p
-          ));
-        }
-        processed++;
-        setBatchProgress({ label: "Processing Images", current: processed, total, currentFile: img.name });
-      }));
+    for (let i = 0; i < newImages.length; i++) {
+      const img = newImages[i];
+      setBatchProgress({ label: "Processing Images", current: i, total, currentFile: img.name });
       await yieldToMain();
+      try {
+        const result = await processImage(img.originalUrl, null, logoScale, logoX, logoY, blurEnabled, maskerEnabled, undefined, img.psUrl);
+        const compositedUrl = result.url;
+        setImages(prev => prev.map(p =>
+          p.id === img.id ? { ...p, psUrl: result.newPsUrl, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
+        ));
+      } catch (err) {
+        console.error("Error processing " + img.name, err);
+        setImages(prev => prev.map(p =>
+          p.id === img.id ? { ...p, status: "error" } : p
+        ));
+      }
+      setBatchProgress({ label: "Processing Images", current: i + 1, total, currentFile: img.name });
     }
     setBatchProgress(null);
+    isProcessingRef.current = false;
     setIsProcessingAll(false);
   };
 
@@ -210,26 +224,26 @@ export default function Home() {
     setBatchProgress({ label: "Processing Images", current: 0, total, currentFile: "" });
     let processed = 0;
 
-    for (let i = 0; i < newImages.length; i += BATCH_SIZE) {
-      const batch = newImages.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (img) => {
-        try {
-          const compositedUrl = await processImage(img.originalUrl);
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
-          ));
-        } catch (err) {
-          console.error("Error processing " + img.name, err);
-          setImages(prev => prev.map(p =>
-            p.id === img.id ? { ...p, status: "error" } : p
-          ));
-        }
-        processed++;
-        setBatchProgress({ label: "Processing Images", current: processed, total, currentFile: img.relativePath || img.name });
-      }));
+    for (let i = 0; i < newImages.length; i++) {
+      const img = newImages[i];
+      setBatchProgress({ label: "Processing Images", current: i, total, currentFile: img.relativePath || img.name });
       await yieldToMain();
+      try {
+        const result = await processImage(img.originalUrl, null, logoScale, logoX, logoY, blurEnabled, maskerEnabled, undefined, img.psUrl);
+        const compositedUrl = result.url;
+        setImages(prev => prev.map(p =>
+          p.id === img.id ? { ...p, psUrl: result.newPsUrl, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
+        ));
+      } catch (err) {
+        console.error("Error processing " + img.name, err);
+        setImages(prev => prev.map(p =>
+          p.id === img.id ? { ...p, status: "error" } : p
+        ));
+      }
+      setBatchProgress({ label: "Processing Images", current: i + 1, total, currentFile: img.relativePath || img.name });
     }
     setBatchProgress(null);
+    isProcessingRef.current = false;
     setIsProcessingAll(false);
     e.target.value = "";
   };
@@ -240,27 +254,32 @@ export default function Home() {
     const currentImages = imagesRef.current;
     const total = currentImages.length;
     if (total === 0) return;
+    isProcessingRef.current = true;
     setBatchProgress({ label: "Removing Logo", current: 0, total, currentFile: "" });
     setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
     let processed = 0;
-    for (let i = 0; i < currentImages.length; i += BATCH_SIZE) {
-      const batch = currentImages.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (img) => {
-        try {
-          const compositedUrl = await processImage(img.originalUrl, null);
-          setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p));
-        } catch (e) {
-          setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
-        }
-        processed++;
-        setBatchProgress({ label: "Removing Logo", current: processed, total, currentFile: img.name });
-      }));
+    for (let i = 0; i < currentImages.length; i++) {
+      const img = currentImages[i];
+      setBatchProgress({ label: "Removing Logo", current: i, total, currentFile: img.name });
       await yieldToMain();
+      try {
+        const result = await processImage(
+          img.originalUrl, 
+          null, // No logo
+          logoScale, logoX, logoY,
+          blurEnabled, maskerEnabled,
+          undefined, img.psUrl
+        );
+        const compositedUrl = result.url;
+        setImages(prev => prev.map(p => p.id === img.id ? { ...p, psUrl: result.newPsUrl, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p));
+      } catch (e) {
+        setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
+      }
+      setBatchProgress({ label: "Removing Logo", current: i + 1, total, currentFile: img.name });
     }
     setBatchProgress(null);
+    isProcessingRef.current = false;
   };
-
-  // Handle Logo Upload
   const handleLogoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.length) return;
     const file = e.target.files[0];
@@ -271,24 +290,31 @@ export default function Home() {
     const currentImages = imagesRef.current;
     const total = currentImages.length;
     if (total === 0) return;
+    isProcessingRef.current = true;
     setBatchProgress({ label: "Applying Logo", current: 0, total, currentFile: "" });
     setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
     let processed = 0;
-    for (let i = 0; i < currentImages.length; i += BATCH_SIZE) {
-      const batch = currentImages.slice(i, i + BATCH_SIZE);
-      await Promise.all(batch.map(async (img) => {
-        try {
-          const compositedUrl = await processImage(img.originalUrl, url);
-          setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p));
-        } catch (error) {
-          setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
-        }
-        processed++;
-        setBatchProgress({ label: "Applying Logo", current: processed, total, currentFile: img.name });
-      }));
+    for (let i = 0; i < currentImages.length; i++) {
+      const img = currentImages[i];
+      setBatchProgress({ label: "Applying Logo", current: i, total, currentFile: img.name });
       await yieldToMain();
+      try {
+        const result = await processImage(
+          img.originalUrl, 
+          url, // New logo url
+          logoScale, logoX, logoY,
+          blurEnabled, maskerEnabled,
+          undefined, img.psUrl
+        );
+        const compositedUrl = result.url;
+        setImages(prev => prev.map(p => p.id === img.id ? { ...p, psUrl: result.newPsUrl, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p));
+      } catch (error) {
+        setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
+      }
+      setBatchProgress({ label: "Applying Logo", current: i + 1, total, currentFile: img.name });
     }
     setBatchProgress(null);
+    isProcessingRef.current = false;
   };
 
   const downloadAll = async () => {
@@ -339,33 +365,38 @@ export default function Home() {
     setZipProgress(null);
   };
 
-  // Trigger re-composite when settings change
+  // Trigger re-composite when settings change (only if no batch is already running)
   useEffect(() => {
     if (images.length === 0) return;
     const recomposite = async () => {
+      if (isProcessingRef.current) return; // bail — a batch loop is already in charge
       const currentImages = imagesRef.current;
       setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
-      for (let i = 0; i < currentImages.length; i += BATCH_SIZE) {
-        const batch = currentImages.slice(i, i + BATCH_SIZE);
-        await Promise.all(batch.map(async (img) => {
-          try {
-            const compositedUrl = await processImage(img.originalUrl);
-            setImages(prev => prev.map(p =>
-              p.id === img.id ? { ...p, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
-            ));
-          } catch (e) {
-            setImages(prev => prev.map(p =>
-              p.id === img.id ? { ...p, status: "error" } : p
-            ));
-          }
-        }));
+      for (let i = 0; i < currentImages.length; i++) {
+        const img = currentImages[i];
         await yieldToMain();
+        try {
+          const result = await processImage(
+            img.originalUrl,
+            logoUrl, logoScale, logoX, logoY,
+            blurEnabled, maskerEnabled, undefined,
+            img.psUrl
+          );
+          const compositedUrl = result.url;
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, psUrl: result.newPsUrl, compositedUrl: compositedUrl === img.originalUrl ? null : compositedUrl, status: "done" } : p
+          ));
+        } catch (e) {
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, status: "error" } : p
+          ));
+        }
       }
     };
-    const timeout = setTimeout(recomposite, 200);
+    const timeout = setTimeout(recomposite, 400);
     return () => clearTimeout(timeout);
   }, [
-    images.length > 0, logoUrl, logoScale, logoX, logoY,
+    logoUrl, logoScale, logoX, logoY,
     blurEnabled,
     maskerEnabled, maskerAlpha, maskerScale, maskerX, maskerY,
     maskerSeam, maskerBold, maskerBlur, maskerDecay, maskerLinear
@@ -768,13 +799,45 @@ export default function Home() {
                     >
                       {/* Header */}
                       <div className="flex items-center justify-between px-5 py-4 border-b border-border/50 bg-background/30 backdrop-blur-md z-20 relative">
-                        <p className="font-semibold text-sm truncate max-w-[70%] text-foreground">{img.name}</p>
-                        <button
-                          onClick={() => removeImage(img.id)}
-                          className="text-muted-foreground hover:text-red-500 transition-colors p-2 rounded-full hover:bg-red-50/50 dark:hover:bg-red-950/30"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
+                        <p className="font-semibold text-sm truncate max-w-[50%] text-foreground" title={img.name}>{img.name}</p>
+                        <div className="flex items-center gap-1">
+                          <button
+                            onClick={async (e) => {
+                                e.stopPropagation();
+                                if (img.status === "processing") return;
+                                
+                                setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "processing" } : p));
+                                try {
+                                    const result = await processImage(
+                                        img.originalUrl,
+                                        logoUrl, logoScale, logoX, logoY,
+                                        true, // Force PS Surface Blur for this image
+                                        maskerEnabled, { alpha: maskerAlpha, scale: maskerScale, x: maskerX, y: maskerY, boldness: maskerBold, blur: maskerBlur, seam: maskerSeam, decay: maskerDecay, linearMath: maskerLinear },
+                                        null // Explicitly passing null forces a fresh re-run
+                                    );
+                                    const compositedUrl = result.url;
+                                    setImages(prev => prev.map(p => p.id === img.id ? { ...p, psUrl: result.newPsUrl, compositedUrl, status: "done" } : p));
+                                } catch (err) {
+                                    setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
+                                }
+                            }}
+                            disabled={img.status === "processing"}
+                            className="text-xs font-semibold px-2.5 py-1.5 rounded-md bg-accent/10 text-accent hover:bg-accent hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                            title="Process this image through Photoshop"
+                          >
+                            <Layers className="w-3.5 h-3.5" />
+                            <span>PS</span>
+                          </button>
+                          <button
+                            onClick={(e) => {
+                                e.stopPropagation();
+                                removeImage(img.id);
+                            }}
+                            className="text-muted-foreground hover:text-red-500 transition-colors p-2 rounded-full hover:bg-red-50/50 dark:hover:bg-red-950/30"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
                       {/* Image Previews */}
                       <div

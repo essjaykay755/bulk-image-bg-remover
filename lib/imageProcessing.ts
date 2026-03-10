@@ -1,10 +1,9 @@
-import { removeBackground } from "@imgly/background-removal";
-
 export type BgRemovalMode = "ai" | "threshold";
 
 /** Uses @imgly AI model - great for complex/non-white backgrounds */
 const removeBackgroundAI = async (imageFile: File): Promise<string> => {
-  const resultBlob = await removeBackground(imageFile, {
+  const imgly = await import("@imgly/background-removal");
+  const resultBlob = await imgly.removeBackground(imageFile, {
     publicPath: "https://staticimgly.com/@imgly/background-removal/1.7.0/dist/",
     model: "isnet",
   });
