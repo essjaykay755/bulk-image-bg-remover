@@ -34,10 +34,11 @@ Output a single high-quality image.`;
 
 export async function POST(req: NextRequest) {
     try {
-        const apiKey = process.env.GOOGLE_AI_API_KEY;
-        if (!apiKey || apiKey === "your-api-key-here") {
+        const apiKey = process.env.GOOGLE_CLOUD_API_KEY;
+
+        if (!apiKey || apiKey === "your-vertex-api-key-here") {
             return NextResponse.json(
-                { error: "GOOGLE_AI_API_KEY is not configured. Add it to .env.local" },
+                { error: "GOOGLE_CLOUD_API_KEY is not configured. Get it from Vertex AI Studio and add it to .env.local" },
                 { status: 500 }
             );
         }
@@ -56,7 +57,9 @@ export async function POST(req: NextRequest) {
             finalPrompt += `\n\nADDITIONAL INSTRUCTION — FIX WRINKLES: The product has heavy wrinkles and creases on its leather/fabric surface. Smooth out these wrinkles significantly while keeping the natural leather grain texture intact. The surface should look like a brand-new, unwrinkled product fresh from the factory. Remove deep creases, folds, and deformation marks, but preserve natural material texture (grain, pores, stitching).`;
         }
 
-        const ai = new GoogleGenAI({ apiKey });
+        const ai = new GoogleGenAI({
+            apiKey,
+        });
 
         const response = await ai.models.generateContent({
             model: "gemini-3.1-flash-image-preview",
