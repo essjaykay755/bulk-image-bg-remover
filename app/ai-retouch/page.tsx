@@ -1,8 +1,9 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
+import { applyLogo } from "@/lib/imageProcessing";
 import Link from "next/link";
-import { Upload, Image as ImageIcon, Download, Trash2, FileImage, ArrowLeft, FolderOpen, Loader2, Sparkles, RefreshCw, X, SlidersHorizontal } from "lucide-react";
+import { Upload, Image as ImageIcon, Download, Trash2, FileImage, ArrowLeft, FolderOpen, Loader2, Sparkles, RefreshCw, X, SlidersHorizontal, Blend, Stamp } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
@@ -22,19 +23,33 @@ interface ProcessedImage {
     errorMessage?: string;
     relativePath?: string;
     fixWrinkles: boolean;
+    // Surface Blur (Photoshop)
+    surfaceBlurUrl: string | null;
+    surfaceBlurBase64: string | null;
+    surfaceBlurMimeType: string | null;
+    surfaceBlurStatus: "idle" | "processing" | "done" | "error";
 }
 
 export default function AIRetouchPage() {
     const [images, setImages] = useState<ProcessedImage[]>([]);
     const [isGenerating, setIsGenerating] = useState(false);
+    const [isBlurringAll, setIsBlurringAll] = useState(false);
     const [viewingImageId, setViewingImageId] = useState<string | null>(null);
     const viewingImage = images.find(img => img.id === viewingImageId);
 
     // Refs
     const foregroundInputRef = useRef<HTMLInputElement>(null);
     const folderInputRef = useRef<HTMLInputElement>(null);
+    const logoInputRef = useRef<HTMLInputElement>(null);
     const imagesRef = useRef<ProcessedImage[]>([]);
     useEffect(() => { imagesRef.current = images; }, [images]);
+
+    // Logo state
+    const [logoFile, setLogoFile] = useState<File | null>(null);
+    const [logoUrl, setLogoUrl] = useState<string | null>(null);
+    const [logoScale, setLogoScale] = useState<number>(0.15);
+    const [logoX, setLogoX] = useState<number>(9);
+    const [logoY, setLogoY] = useState<number>(9);
 
     // Progress state
     const [batchProgress, setBatchProgress] = useState<{
@@ -69,6 +84,10 @@ export default function AIRetouchPage() {
             name: file.name,
             status: "idle",
             fixWrinkles: false,
+            surfaceBlurUrl: null,
+            surfaceBlurBase64: null,
+            surfaceBlurMimeType: null,
+            surfaceBlurStatus: "idle",
         }));
 
         setImages(prev => [...prev, ...newImages]);
@@ -93,6 +112,10 @@ export default function AIRetouchPage() {
                 status: "idle" as const,
                 relativePath,
                 fixWrinkles: false,
+                surfaceBlurUrl: null,
+                surfaceBlurBase64: null,
+                surfaceBlurMimeType: null,
+                surfaceBlurStatus: "idle" as const,
             };
         });
 
@@ -211,6 +234,85 @@ export default function AIRetouchPage() {
         }
     };
 
+    // Apply Photoshop Surface Blur to a single generated image
+    const handleSurfaceBlur = async (imgId: string) => {
+        const img = imagesRef.current.find(i => i.id === imgId);
+        if (!img || !img.generatedBase64) return;
+
+        setImages(prev => prev.map(p =>
+            p.id === imgId ? { ...p, surfaceBlurStatus: "processing" } : p
+        ));
+
+        try {
+            const response = await fetch("/api/run-ps", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    imageBase64: img.generatedBase64,
+                    mimeType: img.generatedMimeType || "image/png",
+                }),
+            });
+
+            if (!response.ok) {
+                const err = await response.json();
+                throw new Error(err.error || `HTTP ${response.status}`);
+            }
+
+            const data = await response.json();
+            const blob = await fetch(`data:${data.mimeType};base64,${data.imageBase64}`).then(r => r.blob());
+            const blurUrl = URL.createObjectURL(blob);
+
+            setImages(prev => prev.map(p =>
+                p.id === imgId ? {
+                    ...p,
+                    surfaceBlurUrl: blurUrl,
+                    surfaceBlurBase64: data.imageBase64,
+                    surfaceBlurMimeType: data.mimeType,
+                    surfaceBlurStatus: "done",
+                } : p
+            ));
+        } catch (err: any) {
+            console.error("Surface Blur error for " + img.name, err);
+            setImages(prev => prev.map(p =>
+                p.id === imgId ? { ...p, surfaceBlurStatus: "error", errorMessage: err.message } : p
+            ));
+        }
+    };
+
+    // Batch apply Photoshop Surface Blur to all done images
+    const handleSurfaceBlurAll = async () => {
+        const blurrableImages = imagesRef.current.filter(
+            img => img.status === "done" && img.generatedBase64 && img.surfaceBlurStatus !== "done" && img.surfaceBlurStatus !== "processing"
+        );
+        if (blurrableImages.length === 0) return;
+
+        setIsBlurringAll(true);
+        const total = blurrableImages.length;
+        setBatchProgress({ label: "Applying Surface Blur", current: 0, total, currentFile: "" });
+
+        for (let i = 0; i < blurrableImages.length; i++) {
+            const img = blurrableImages[i];
+            setBatchProgress({ label: "Applying Surface Blur", current: i, total, currentFile: img.name });
+            await handleSurfaceBlur(img.id);
+        }
+
+        setBatchProgress(null);
+        setIsBlurringAll(false);
+    };
+
+    // Handle Logo Upload
+    const handleLogoUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        if (!e.target.files?.length) return;
+        const file = e.target.files[0];
+        setLogoFile(file);
+        setLogoUrl(URL.createObjectURL(file));
+    };
+
+    const clearLogo = () => {
+        setLogoFile(null);
+        setLogoUrl(null);
+    };
+
     // Download all as ZIP with folder structure
     const downloadAll = async () => {
         const zip = new JSZip();
@@ -229,8 +331,18 @@ export default function AIRetouchPage() {
 
             setZipProgress({ active: true, currentFolder: folderLabel, currentFile: img.name, current: i + 1, total });
 
-            // Use generated if available, otherwise original
-            const targetUrl = img.generatedUrl || img.originalUrl;
+            // Use surface-blurred if available, then generated, then original
+            let targetUrl = img.surfaceBlurUrl || img.generatedUrl || img.originalUrl;
+
+            // Apply logo watermark if one is set
+            if (targetUrl && logoUrl) {
+                try {
+                    targetUrl = await applyLogo(targetUrl, logoUrl, logoScale, logoX, logoY);
+                } catch (err) {
+                    console.error("Logo apply error for " + img.name, err);
+                }
+            }
+
             if (targetUrl) {
                 const response = await fetch(targetUrl);
                 const blob = await response.blob();
@@ -257,6 +369,7 @@ export default function AIRetouchPage() {
 
     const doneCount = images.filter(img => img.status === "done").length;
     const idleOrErrorCount = images.filter(img => img.status === "idle" || img.status === "error").length;
+    const blurrableCount = images.filter(img => img.status === "done" && img.generatedBase64 && img.surfaceBlurStatus !== "done" && img.surfaceBlurStatus !== "processing").length;
 
     return (
         <div className="min-h-[100dvh] bg-background text-foreground font-sans selection:bg-accent/30 selection:text-accent-foreground p-6 sm:p-8 md:p-12 transition-colors duration-500">
@@ -297,6 +410,25 @@ export default function AIRetouchPage() {
                                         <Sparkles className="w-5 h-5 group-hover:rotate-12 transition-transform" />
                                     )}
                                     {isGenerating ? "Generating..." : `Generate ${idleOrErrorCount > 0 ? `(${idleOrErrorCount})` : "All"}`}
+                                </motion.button>
+                            )}
+
+                            {blurrableCount > 0 && (
+                                <motion.button
+                                    whileHover={{ scale: 1.02 }}
+                                    whileTap={{ scale: 0.98 }}
+                                    initial={{ opacity: 0, y: 10 }}
+                                    animate={{ opacity: 1, y: 0 }}
+                                    onClick={handleSurfaceBlurAll}
+                                    disabled={isBlurringAll}
+                                    className="group flex items-center gap-3 px-8 py-3.5 bg-blue-600 text-white rounded-full font-semibold shadow-xl hover:shadow-2xl transition-all disabled:opacity-50 disabled:pointer-events-none"
+                                >
+                                    {isBlurringAll ? (
+                                        <Loader2 className="w-5 h-5 animate-spin" />
+                                    ) : (
+                                        <Blend className="w-5 h-5 group-hover:rotate-12 transition-transform" />
+                                    )}
+                                    {isBlurringAll ? "Blurring..." : `Blur All (${blurrableCount})`}
                                 </motion.button>
                             )}
 
@@ -388,6 +520,125 @@ export default function AIRetouchPage() {
                                 </li>
                             </ol>
                         </div>
+
+                        {/* Logo Watermark */}
+                        <div className="liquid-glass p-8 rounded-[2.5rem] transition-all">
+                            <div className="flex items-center justify-between mb-6">
+                                <h3 className="text-lg font-bold flex items-center gap-3 text-foreground">
+                                    <Stamp className="w-5 h-5 text-accent" />
+                                    Watermark
+                                </h3>
+                                {logoUrl && (
+                                    <button onClick={clearLogo} className="text-xs text-red-500 hover:text-red-400 transition-colors font-semibold uppercase tracking-wider">Clear</button>
+                                )}
+                            </div>
+
+                            {logoUrl ? (
+                                <div className="relative rounded-[1.5rem] overflow-hidden aspect-[4/3] border border-border group shadow-sm bg-muted/20 checkerboard">
+                                    <img src={logoUrl} alt="Logo" className="w-[85%] h-[85%] mx-auto my-auto object-contain drop-shadow-md" style={{ marginTop: '7.5%' }} />
+                                    <div className="absolute inset-0 bg-background/50 backdrop-blur-sm opacity-0 group-hover:opacity-100 transition-opacity duration-300 flex items-center justify-center">
+                                        <motion.button
+                                            whileTap={{ scale: 0.95 }}
+                                            onClick={() => logoInputRef.current?.click()}
+                                            className="px-5 py-2.5 bg-foreground text-background rounded-full font-semibold text-sm shadow-xl"
+                                        >
+                                            Replace Logo
+                                        </motion.button>
+                                    </div>
+                                </div>
+                            ) : (
+                                <div
+                                    onClick={() => logoInputRef.current?.click()}
+                                    className="group border border-dashed border-muted-foreground/30 bg-muted/5 rounded-[1.5rem] p-10 flex flex-col items-center justify-center text-center cursor-pointer hover:border-accent hover:bg-accent/5 transition-all duration-300"
+                                >
+                                    <ImageIcon className="w-8 h-8 mb-4 text-muted-foreground group-hover:text-accent transition-colors" />
+                                    <p className="font-semibold text-foreground">Add Logo</p>
+                                    <p className="text-sm text-muted-foreground mt-2 font-medium">PNG recommended</p>
+                                </div>
+                            )}
+
+                            <input
+                                ref={logoInputRef}
+                                type="file"
+                                accept="image/*"
+                                className="hidden"
+                                onChange={handleLogoUpload}
+                            />
+
+                            {logoUrl && (
+                                <div className="pt-6 mt-6 border-t border-border/50 space-y-5">
+                                    <label className="text-sm font-bold tracking-tight text-foreground flex items-center gap-2 pb-2">
+                                        Logo Placement
+                                    </label>
+
+                                    {/* Logo Scale */}
+                                    <div className="space-y-2">
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-xs font-medium text-muted-foreground">Scale</span>
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="number" min="0.01" max="1.0" step="0.01"
+                                                    value={logoScale}
+                                                    onChange={(e) => setLogoScale(parseFloat(e.target.value) || 0.15)}
+                                                    className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                                                />
+                                                <span className="text-muted-foreground text-xs font-mono">x</span>
+                                            </div>
+                                        </div>
+                                        <input
+                                            type="range" min="0.01" max="1.0" step="0.01"
+                                            value={logoScale}
+                                            onChange={(e) => setLogoScale(parseFloat(e.target.value))}
+                                            className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
+                                        />
+                                    </div>
+
+                                    {/* Logo Pos X */}
+                                    <div className="space-y-2">
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-xs font-medium text-muted-foreground">Pos X</span>
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="number" min="0" max="100"
+                                                    value={logoX}
+                                                    onChange={(e) => setLogoX(parseInt(e.target.value) || 0)}
+                                                    className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                                                />
+                                                <span className="text-muted-foreground text-xs font-mono">%</span>
+                                            </div>
+                                        </div>
+                                        <input
+                                            type="range" min="0" max="100"
+                                            value={logoX}
+                                            onChange={(e) => setLogoX(parseInt(e.target.value))}
+                                            className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
+                                        />
+                                    </div>
+
+                                    {/* Logo Pos Y */}
+                                    <div className="space-y-2">
+                                        <div className="flex justify-between items-center">
+                                            <span className="text-xs font-medium text-muted-foreground">Pos Y</span>
+                                            <div className="flex items-center gap-2">
+                                                <input
+                                                    type="number" min="0" max="100"
+                                                    value={logoY}
+                                                    onChange={(e) => setLogoY(parseInt(e.target.value) || 0)}
+                                                    className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                                                />
+                                                <span className="text-muted-foreground text-xs font-mono">%</span>
+                                            </div>
+                                        </div>
+                                        <input
+                                            type="range" min="0" max="100"
+                                            value={logoY}
+                                            onChange={(e) => setLogoY(parseInt(e.target.value))}
+                                            className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
+                                        />
+                                    </div>
+                                </div>
+                            )}
+                        </div>
                     </aside>
 
                     {/* Right Content - Gallery */}
@@ -444,6 +695,32 @@ export default function AIRetouchPage() {
                                                     >
                                                         {img.fixWrinkles ? '🧹 Wrinkles' : '🧹'}
                                                     </button>
+                                                    {/* Surface Blur — only visible after AI generation */}
+                                                    {img.status === "done" && (
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                if (img.surfaceBlurStatus !== "processing") {
+                                                                    handleSurfaceBlur(img.id);
+                                                                }
+                                                            }}
+                                                            disabled={img.surfaceBlurStatus === "processing"}
+                                                            className={`text-xs px-2.5 py-1 rounded-full font-semibold transition-all border flex items-center gap-1 ${img.surfaceBlurStatus === "done"
+                                                                ? 'bg-blue-500/15 text-blue-500 border-blue-500/30'
+                                                                : img.surfaceBlurStatus === "processing"
+                                                                    ? 'bg-blue-500/10 text-blue-400 border-blue-400/20 opacity-70'
+                                                                    : 'bg-transparent text-muted-foreground border-border hover:border-blue-500/30 hover:text-blue-500'
+                                                                }`}
+                                                            title={img.surfaceBlurStatus === "done" ? "Surface blur applied" : img.surfaceBlurStatus === "processing" ? "Applying blur..." : "Apply Photoshop surface blur"}
+                                                        >
+                                                            {img.surfaceBlurStatus === "processing" ? (
+                                                                <Loader2 className="w-3 h-3 animate-spin" />
+                                                            ) : (
+                                                                <Blend className="w-3 h-3" />
+                                                            )}
+                                                            {img.surfaceBlurStatus === "done" ? 'Blurred' : img.surfaceBlurStatus === "processing" ? 'Blurring...' : 'Blur'}
+                                                    </button>
+                                                    )}
                                                     {img.status !== "generating" && (
                                                         <button
                                                             onClick={() => handleGenerateSingle(img.id)}
@@ -479,7 +756,11 @@ export default function AIRetouchPage() {
                                                     </div>
                                                 )}
 
-                                                {img.generatedUrl ? (
+                                                {img.surfaceBlurUrl ? (
+                                                    <div className="relative w-full aspect-square flex items-center justify-center overflow-hidden">
+                                                        <img src={img.surfaceBlurUrl} alt="Surface Blurred" className="w-full h-full object-cover" />
+                                                    </div>
+                                                ) : img.generatedUrl ? (
                                                     <div className="relative w-full aspect-square flex items-center justify-center overflow-hidden">
                                                         <img src={img.generatedUrl} alt="Generated" className="w-full h-full object-cover" />
                                                     </div>
@@ -557,7 +838,7 @@ export default function AIRetouchPage() {
 
                                 {/* Modal body — side-by-side images */}
                                 <div className="flex-1 overflow-auto p-6">
-                                    <div className={`grid gap-6 ${viewingImage.generatedUrl ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1'}`}>
+                                    <div className={`grid gap-6 ${viewingImage.surfaceBlurUrl ? 'grid-cols-1 md:grid-cols-3' : viewingImage.generatedUrl ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1'}`}>
                                         {/* Original */}
                                         <div className="space-y-3">
                                             <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Original</span>
@@ -572,6 +853,16 @@ export default function AIRetouchPage() {
                                                 <span className="text-xs font-bold uppercase tracking-wider text-accent">AI Generated</span>
                                                 <div className="rounded-xl overflow-hidden border border-accent/30 shadow-lg shadow-accent/5">
                                                     <img src={viewingImage.generatedUrl} alt="Generated" className="w-full h-auto object-contain max-h-[65vh]" />
+                                                </div>
+                                            </div>
+                                        )}
+
+                                        {/* Surface Blurred */}
+                                        {viewingImage.surfaceBlurUrl && (
+                                            <div className="space-y-3">
+                                                <span className="text-xs font-bold uppercase tracking-wider text-blue-500">Surface Blurred</span>
+                                                <div className="rounded-xl overflow-hidden border border-blue-500/30 shadow-lg shadow-blue-500/5">
+                                                    <img src={viewingImage.surfaceBlurUrl} alt="Surface Blurred" className="w-full h-auto object-contain max-h-[65vh]" />
                                                 </div>
                                             </div>
                                         )}
