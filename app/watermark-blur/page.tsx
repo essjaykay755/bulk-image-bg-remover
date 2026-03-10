@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { compositeImage, applyLogo, applySelectiveBlur, getPixelColor, applyAiWatermarkMask, runMaskerSolvers } from "@/lib/imageProcessing";
+import { compositeImage, applyLogo, applyAiWatermarkMask, runMaskerSolvers } from "@/lib/imageProcessing";
 import Link from "next/link";
 import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, Pipette, Zap, ArrowLeft, FolderOpen, Loader2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -34,12 +34,8 @@ export default function Home() {
   const [isProcessingAll, setIsProcessingAll] = useState(false);
   const [editingImageId, setEditingImageId] = useState<string | null>(null);
 
-  // Surface Blur State
+  // Surface Blur (Photoshop) State
   const [blurEnabled, setBlurEnabled] = useState(false);
-  const [isEyeDropperActive, setIsEyeDropperActive] = useState(false);
-  const [blurTargetColor, setBlurTargetColor] = useState<{ r: number, g: number, b: number } | null>(null);
-  const [blurTolerance, setBlurTolerance] = useState(20);
-  const [blurAmount, setBlurAmount] = useState(5);
 
   // AI Watermark Masker State
   const [maskerEnabled, setMaskerEnabled] = useState(false);
@@ -64,9 +60,6 @@ export default function Home() {
     currentLogoX: number = logoX,
     currentLogoY: number = logoY,
     currentBlurOn: boolean = blurEnabled,
-    currentBlurTarget: { r: number, g: number, b: number } | null = blurTargetColor,
-    currentBlurTol: number = blurTolerance,
-    currentBlurAmt: number = blurAmount,
     currentMaskerOn: boolean = maskerEnabled,
     currentMaskerOpts = {
       alpha: maskerAlpha, scale: maskerScale, x: maskerX, y: maskerY,
@@ -79,9 +72,40 @@ export default function Home() {
     if (currentMaskerOn) {
       resultUrl = await applyAiWatermarkMask(resultUrl, currentMaskerOpts);
     }
-    if (currentBlurOn && currentBlurTarget) {
-      resultUrl = await applySelectiveBlur(resultUrl, currentBlurTarget, currentBlurTol, currentBlurAmt);
+    
+    if (currentBlurOn) {
+        // Fetch to base64
+        const response = await fetch(resultUrl);
+        const blob = await response.blob();
+        const reader = new FileReader();
+        const base64Promise = new Promise<string>((resolve) => {
+            reader.onloadend = () => {
+                const b64 = reader.result as string;
+                resolve(b64.split(",")[1]);
+            };
+        });
+        reader.readAsDataURL(blob);
+        const imageBase64 = await base64Promise;
+
+        const psResponse = await fetch("/api/run-ps", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+                imageBase64,
+                mimeType: blob.type || "image/png",
+            }),
+        });
+
+        if (!psResponse.ok) {
+            const err = await psResponse.json();
+            throw new Error(err.error || `HTTP ${psResponse.status}`);
+        }
+
+        const data = await psResponse.json();
+        const psBlob = await fetch(`data:${data.mimeType};base64,${data.imageBase64}`).then(r => r.blob());
+        resultUrl = URL.createObjectURL(psBlob);
     }
+
     if (currentLogoUrl) {
       resultUrl = await applyLogo(resultUrl, currentLogoUrl, currentLogoScale, currentLogoX, currentLogoY);
     }
@@ -331,7 +355,7 @@ export default function Home() {
     return () => clearTimeout(timeout);
   }, [
     images.length > 0, logoUrl, logoScale, logoX, logoY,
-    blurEnabled, blurTargetColor, blurTolerance, blurAmount,
+    blurEnabled,
     maskerEnabled, maskerAlpha, maskerScale, maskerX, maskerY,
     maskerSeam, maskerBold, maskerBlur, maskerDecay, maskerLinear
   ]);
@@ -345,35 +369,10 @@ export default function Home() {
     });
   };
 
-  const handleCanvasClick = async (e: React.MouseEvent<HTMLImageElement>, targetImg?: ProcessedImage) => {
-    if (!isEyeDropperActive) return;
-    e.stopPropagation();
-
-    const imgObj = targetImg || activeEditingImage;
-    if (!imgObj) return;
-
-    const imgElement = e.currentTarget;
-    const rect = imgElement.getBoundingClientRect();
-    const x = e.clientX - rect.left;
-    const y = e.clientY - rect.top;
-
-    const scaleX = imgElement.naturalWidth / rect.width;
-    const scaleY = imgElement.naturalHeight / rect.height;
-
-    const imageX = Math.round(x * scaleX);
-    const imageY = Math.round(y * scaleY);
-
-    try {
-      const color = await getPixelColor(imgObj.originalUrl, imageX, imageY, imgElement.naturalWidth, imgElement.naturalHeight);
-      setBlurTargetColor(color);
-      setIsEyeDropperActive(false); // turn off after picking
-    } catch (err) {
-      console.error(err);
-    }
-  };
+  // End of removeImage
 
   return (
-    <div className={`min-h-[100dvh] bg-background text-foreground font-sans selection:bg-accent/30 selection:text-accent-foreground p-6 sm:p-8 md:p-12 transition-colors duration-500 ${isEyeDropperActive ? '[&_*]:cursor-crosshair' : ''}`}>
+    <div className={`min-h-[100dvh] bg-background text-foreground font-sans selection:bg-accent/30 selection:text-accent-foreground p-6 sm:p-8 md:p-12 transition-colors duration-500`}>
       <div className="max-w-[1400px] mx-auto">
         {/* Header */}
         <header className="mb-14 space-y-8">
@@ -579,12 +578,12 @@ export default function Home() {
               )}
             </div>
 
-            {/* Selective Surface Blur */}
+            {/* Photoshop Surface Blur */}
             <div className="liquid-glass p-8 rounded-[2.5rem] transition-all">
               <div className="flex items-center justify-between mb-6">
                 <h3 className="text-lg font-bold flex items-center gap-3 text-foreground">
                   <Layers className="w-5 h-5 text-accent" />
-                  Surface Blur
+                  PS Surface Blur
                 </h3>
                 <button
                   onClick={() => setBlurEnabled(!blurEnabled)}
@@ -595,48 +594,13 @@ export default function Home() {
               </div>
 
               {blurEnabled && (
-                <div className="space-y-6 pt-4 border-t border-border/50">
-                  <div className="flex items-center gap-4">
-                    <button
-                      onClick={() => setIsEyeDropperActive(!isEyeDropperActive)}
-                      className={`flex-1 flex items-center justify-center gap-2 py-3 px-4 rounded-xl font-semibold text-sm transition-all ${isEyeDropperActive ? 'bg-accent text-accent-foreground shadow-lg shadow-accent/25' : 'bg-muted/30 text-foreground hover:bg-muted/50 border border-border'}`}
-                    >
-                      <Pipette className="w-4 h-4" />
-                      {isEyeDropperActive ? 'Click Image to Pick' : 'Pick Target Color'}
-                    </button>
-                    {blurTargetColor && (
-                      <div
-                        className="w-12 h-12 rounded-xl shadow-inner border border-border flex-shrink-0"
-                        style={{ backgroundColor: `rgb(${blurTargetColor.r},${blurTargetColor.g},${blurTargetColor.b})` }}
-                      ></div>
-                    )}
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center text-xs font-medium text-foreground">
-                      <span>Color Tolerance</span>
-                      <span>{blurTolerance}</span>
-                    </div>
-                    <input
-                      type="range" min="1" max="100"
-                      value={blurTolerance}
-                      onChange={(e) => setBlurTolerance(Number(e.target.value))}
-                      className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
-                    />
-                  </div>
-
-                  <div className="space-y-2">
-                    <div className="flex justify-between items-center text-xs font-medium text-foreground">
-                      <span>Blur Amount</span>
-                      <span>{blurAmount}px</span>
-                    </div>
-                    <input
-                      type="range" min="1" max="20"
-                      value={blurAmount}
-                      onChange={(e) => setBlurAmount(Number(e.target.value))}
-                      className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
-                    />
-                  </div>
+                <div className="space-y-4 pt-4 border-t border-border/50">
+                   <p className="text-sm text-muted-foreground">
+                       This will process the image through Adobe Photoshop using your configured Surface Blur action.
+                   </p>
+                   <p className="text-xs text-yellow-500/80 font-medium">
+                       Note: Processing takes ~5 seconds per image depending on action complexity. Photoshop must be running.
+                   </p>
                 </div>
               )}
             </div>
@@ -803,8 +767,8 @@ export default function Home() {
                       </div>
                       {/* Image Previews */}
                       <div
-                        className={`relative flex-1 flex items-center justify-center bg-transparent checkerboard ${!isEyeDropperActive && 'cursor-pointer'}`}
-                        onClick={() => !isEyeDropperActive && setEditingImageId(img.id)}
+                        className="relative flex-1 flex items-center justify-center bg-transparent checkerboard cursor-pointer"
+                        onClick={() => setEditingImageId(img.id)}
                       >
                         {img.status === "processing" ? (
                           <div className="absolute inset-0 bg-background/60 backdrop-blur-sm flex items-center justify-center z-10 pointer-events-none">
@@ -815,11 +779,11 @@ export default function Home() {
                         {/* Show Composited or Original Image */}
                         {img.compositedUrl ? (
                           <div className="relative w-full aspect-square flex items-center justify-center overflow-hidden">
-                            <img src={img.compositedUrl} alt="Composited" className={`w-full h-full object-cover transition-opacity ${isEyeDropperActive ? 'hover:opacity-80' : ''}`} onClick={(e) => { if (isEyeDropperActive) handleCanvasClick(e, img); }} />
+                            <img src={img.compositedUrl} alt="Composited" className="w-full h-full object-cover transition-opacity" />
                           </div>
                         ) : (
                           <div className="w-[85%] aspect-square flex items-center justify-center">
-                            <img src={img.originalUrl} alt="Original" className={`w-full h-full object-contain transition-opacity ${isEyeDropperActive ? 'hover:opacity-80' : ''}`} onClick={(e) => { if (isEyeDropperActive) handleCanvasClick(e, img); }} />
+                            <img src={img.originalUrl} alt="Original" className="w-full h-full object-contain transition-opacity" />
                           </div>
                         )}
                       </div>
@@ -865,11 +829,11 @@ export default function Home() {
 
                   {activeEditingImage && activeEditingImage.compositedUrl ? (
                     <div className="relative w-full max-w-2xl aspect-square flex items-center justify-center">
-                      <img src={activeEditingImage.compositedUrl} alt="Composited" className={`w-full h-full object-contain drop-shadow-2xl ${isEyeDropperActive ? 'cursor-crosshair' : ''}`} onClick={handleCanvasClick} />
+                      <img src={activeEditingImage.compositedUrl} alt="Composited" className="w-full h-full object-contain drop-shadow-2xl" />
                     </div>
                   ) : activeEditingImage ? (
                     <div className="w-full max-w-2xl aspect-square flex items-center justify-center">
-                      <img src={activeEditingImage.originalUrl} alt="Original" className={`w-[85%] h-[85%] object-contain drop-shadow-2xl ${isEyeDropperActive ? 'cursor-crosshair' : ''}`} onClick={handleCanvasClick} />
+                      <img src={activeEditingImage.originalUrl} alt="Original" className="w-[85%] h-[85%] object-contain drop-shadow-2xl" />
                     </div>
                   ) : null}
                 </div>

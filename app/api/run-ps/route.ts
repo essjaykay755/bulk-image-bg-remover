@@ -66,7 +66,7 @@ export async function POST(req: NextRequest) {
         });
 
         // Poll for the marker file (Photoshop writes it when done)
-        const TIMEOUT_MS = 120_000; // 2 minutes
+        const TIMEOUT_MS = 180_000; // 3 minutes
         const POLL_INTERVAL_MS = 1_000;
         const startTime = Date.now();
 
@@ -80,13 +80,24 @@ export async function POST(req: NextRequest) {
         if (!fs.existsSync(markerPath)) {
             fs.rmSync(tempDir, { recursive: true, force: true });
             return NextResponse.json(
-                { error: "Photoshop timed out (2 min). Make sure Photoshop is running." },
+                { error: "Photoshop timed out (3 min). Make sure Photoshop is running." },
                 { status: 500 }
             );
         }
 
-        // Small delay to ensure file write is fully flushed
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        // Check marker content for errors
+        const markerContent = fs.readFileSync(markerPath, "utf8").trim();
+        if (markerContent.startsWith("error:")) {
+            const psError = markerContent.substring(6);
+            fs.rmSync(tempDir, { recursive: true, force: true });
+            return NextResponse.json(
+                { error: `Photoshop action failed: ${psError}` },
+                { status: 500 }
+            );
+        }
+
+        // Delay to ensure file write is fully flushed
+        await new Promise((resolve) => setTimeout(resolve, 2000));
 
         // Read the output file
         if (!fs.existsSync(outputPath)) {
