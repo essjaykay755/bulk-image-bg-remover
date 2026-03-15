@@ -21,6 +21,7 @@ interface ProcessedImage {
     name: string;
     status: "idle" | "generating" | "done" | "error";
     errorMessage?: string;
+    actionMessage?: string;
     relativePath?: string;
     fixWrinkles: boolean;
     // Surface Blur (Photoshop)
@@ -33,6 +34,8 @@ interface ProcessedImage {
 export default function AIRetouchPage() {
     const [images, setImages] = useState<ProcessedImage[]>([]);
     const [isGenerating, setIsGenerating] = useState(false);
+    const [aiProvider, setAiProvider] = useState<"vertex" | "gemini">("vertex");
+    const [aiModel, setAiModel] = useState<"gemini-3.1-flash-image-preview" | "gemini-2.5-flash-image">("gemini-3.1-flash-image-preview");
     const [isBlurringAll, setIsBlurringAll] = useState(false);
     const [viewingImageId, setViewingImageId] = useState<string | null>(null);
     const viewingImage = images.find(img => img.id === viewingImageId);
@@ -138,8 +141,8 @@ export default function AIRetouchPage() {
         });
     };
 
-    // Call the AI API for a single image
-    const generateSingleImage = async (img: ProcessedImage): Promise<{ base64: string; mimeType: string }> => {
+    // Call the AI API for a single image with retry logic for rate limits
+    const generateSingleImage = async (img: ProcessedImage, retryCount = 0): Promise<{ base64: string; mimeType: string }> => {
         const imageBase64 = await fileToBase64(img.originalFile);
         const response = await fetch("/api/ai-retouch", {
             method: "POST",
@@ -148,8 +151,37 @@ export default function AIRetouchPage() {
                 imageBase64,
                 mimeType: img.originalFile.type || "image/jpeg",
                 fixWrinkles: img.fixWrinkles,
+                provider: aiProvider,
+                modelName: aiModel,
             }),
         });
+
+        if (response.status === 429 && retryCount < 5) {
+            const err = await response.json();
+            const errMessage = typeof err.error === 'string' ? err.error : JSON.stringify(err.error || {});
+
+            // Try to parse "retry in 21s" or similar
+            let delayMs = 15000; // default 15s wait
+            const match = errMessage.match(/retry in ([\d.]+)s/i);
+            if (match && match[1]) {
+                delayMs = Math.ceil(parseFloat(match[1])) * 1000 + 2000; // Add 2s buffer
+            }
+            
+            const seconds = Math.round(delayMs / 1000);
+            
+            // Set image specific status
+            setImages(prev => prev.map(p => p.id === img.id ? { ...p, actionMessage: `Rate limit paused (${seconds}s)...` } : p));
+            // Inform user via batch UI if present
+            setBatchProgress(prev => prev ? { ...prev, label: `Rate limit paused (${seconds}s)...` } : null);
+            
+            await new Promise(resolve => setTimeout(resolve, delayMs));
+            
+            // Restore label
+            setImages(prev => prev.map(p => p.id === img.id ? { ...p, actionMessage: undefined } : p));
+            setBatchProgress(prev => prev ? { ...prev, label: "Generating Realistic Images" } : null);
+            
+            return generateSingleImage(img, retryCount + 1);
+        }
 
         if (!response.ok) {
             const err = await response.json();
@@ -170,9 +202,10 @@ export default function AIRetouchPage() {
         const total = toProcess.length;
         setBatchProgress({ label: "Generating Realistic Images", current: 0, total, currentFile: "" });
         let processed = 0;
+        const currentBatchSize = aiProvider === "gemini" ? 1 : BATCH_SIZE;
 
-        for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
-            const batch = toProcess.slice(i, i + BATCH_SIZE);
+        for (let i = 0; i < toProcess.length; i += currentBatchSize) {
+            const batch = toProcess.slice(i, i + currentBatchSize);
             await Promise.all(batch.map(async (img) => {
                 setImages(prev => prev.map(p =>
                     p.id === img.id ? { ...p, status: "generating" } : p
@@ -395,7 +428,29 @@ export default function AIRetouchPage() {
                             </p>
                         </div>
 
-                        <div className="flex items-center gap-3">
+                        <div className="flex flex-wrap items-center gap-3">
+                            <select
+                                value={aiProvider}
+                                onChange={(e) => setAiProvider(e.target.value as "vertex" | "gemini")}
+                                className="px-5 py-3.5 bg-background border border-border rounded-full text-sm font-medium focus:outline-accent focus:ring-2 focus:ring-accent/20 cursor-pointer shadow-sm hover:shadow-md transition-shadow"
+                                title="Select AI Provider"
+                            >
+                                <option value="vertex">Google Vertex AI</option>
+                                <option value="gemini">Google Gemini API</option>
+                            </select>
+
+                            {aiProvider === "gemini" && (
+                                <select
+                                    value={aiModel}
+                                    onChange={(e) => setAiModel(e.target.value as any)}
+                                    className="px-5 py-3.5 bg-background border border-border rounded-full text-sm font-medium focus:outline-accent focus:ring-2 focus:ring-accent/20 cursor-pointer shadow-sm hover:shadow-md transition-shadow"
+                                    title="Select Gemini Model"
+                                >
+                                    <option value="gemini-3.1-flash-image-preview">gemini-3.1-flash-image-preview</option>
+                                    <option value="gemini-2.5-flash-image">gemini-2.5-flash-image</option>
+                                </select>
+                            )}
+
                             {idleOrErrorCount > 0 && (
                                 <motion.button
                                     whileHover={{ scale: 1.02 }}
@@ -752,9 +807,11 @@ export default function AIRetouchPage() {
                                                 onClick={() => img.status !== "generating" && setViewingImageId(img.id)}
                                             >
                                                 {img.status === "generating" && (
-                                                    <div className="absolute inset-0 bg-background/60 backdrop-blur-sm flex flex-col items-center justify-center z-10 gap-3">
+                                                    <div className="absolute inset-0 bg-background/60 backdrop-blur-sm flex flex-col items-center justify-center z-10 gap-3 text-center px-4">
                                                         <Loader2 className="w-8 h-8 text-accent animate-spin" />
-                                                        <span className="text-sm font-semibold text-foreground">Generating...</span>
+                                                        <span className="text-sm font-semibold text-foreground">
+                                                            {img.actionMessage || "Generating..."}
+                                                        </span>
                                                     </div>
                                                 )}
 

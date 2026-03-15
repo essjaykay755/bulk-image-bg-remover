@@ -34,21 +34,27 @@ Output a single high-quality image.`;
 
 export async function POST(req: NextRequest) {
     try {
-        const apiKey = process.env.GOOGLE_CLOUD_API_KEY;
-
-        if (!apiKey || apiKey === "your-vertex-api-key-here") {
-            return NextResponse.json(
-                { error: "GOOGLE_CLOUD_API_KEY is not configured. Get it from Vertex AI Studio and add it to .env.local" },
-                { status: 500 }
-            );
-        }
-
-        const { imageBase64, mimeType, fixWrinkles } = await req.json();
+        const { imageBase64, mimeType, fixWrinkles, provider, modelName } = await req.json();
 
         if (!imageBase64 || !mimeType) {
             return NextResponse.json(
                 { error: "Missing imageBase64 or mimeType" },
                 { status: 400 }
+            );
+        }
+
+        let apiKey = process.env.GOOGLE_CLOUD_API_KEY;
+        let apiKeyName = "GOOGLE_CLOUD_API_KEY";
+
+        if (provider === "gemini") {
+            apiKey = process.env.GEMINI_API_KEY;
+            apiKeyName = "GEMINI_API_KEY";
+        }
+
+        if (!apiKey || apiKey === "your-vertex-api-key-here" || apiKey === "your-gemini-api-key-here") {
+            return NextResponse.json(
+                { error: `${apiKeyName} is not configured. Please add it to .env.local` },
+                { status: 500 }
             );
         }
 
@@ -62,7 +68,7 @@ export async function POST(req: NextRequest) {
         });
 
         const response = await ai.models.generateContent({
-            model: "gemini-3.1-flash-image-preview",
+            model: modelName || "gemini-3.1-flash-image-preview",
             contents: [
                 {
                     role: "user",
@@ -109,9 +115,30 @@ export async function POST(req: NextRequest) {
         );
     } catch (error: any) {
         console.error("AI Retouch error:", error);
+        
+        let status = 500;
+        let errorMessage = error.message || "Internal server error";
+
+        // Handle stringified JSON errors from SDK
+        if (typeof errorMessage === "string" && errorMessage.startsWith("{")) {
+            try {
+                const parsed = JSON.parse(errorMessage);
+                if (parsed.error) {
+                    errorMessage = parsed.error.message || errorMessage;
+                    if (parsed.error.code === 429) status = 429;
+                }
+            } catch (e) {
+                // Ignore parse errors
+            }
+        }
+        
+        if (error.status === 429 || errorMessage.includes("429")) {
+            status = 429;
+        }
+
         return NextResponse.json(
-            { error: error.message || "Internal server error" },
-            { status: 500 }
+            { error: errorMessage },
+            { status }
         );
     }
 }
