@@ -327,8 +327,9 @@ export default function AIRetouchPage() {
             const img = blurrableImages[i];
             setBatchProgress({ label: "Applying Surface Blur", current: i, total, currentFile: img.name });
             await handleSurfaceBlur(img.id);
-            // Give Photoshop time to fully close the document before next image
-            await new Promise(resolve => setTimeout(resolve, 3000));
+            setBatchProgress({ label: "Applying Surface Blur", current: i + 1, total, currentFile: img.name });
+            // Keep a modest buffer so Photoshop can fully hand off shutdown/startup between jobs.
+            await new Promise(resolve => setTimeout(resolve, 1500));
         }
 
         setBatchProgress(null);

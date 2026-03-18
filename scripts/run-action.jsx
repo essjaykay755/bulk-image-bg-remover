@@ -1,4 +1,4 @@
-#target photoshop
+// @target photoshop
 
 // Suppress all dialogs during action playback
 var originalDialogMode = app.displayDialogs;

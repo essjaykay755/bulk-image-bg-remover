@@ -1,5 +1,6 @@
 @import "tailwindcss";
 
+/* Tailwind CSS v4 theme configuration */
 @theme {
   --color-background: var(--background);
   --color-foreground: var(--foreground);

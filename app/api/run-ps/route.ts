@@ -20,6 +20,41 @@ function enqueuePS<T>(job: () => Promise<T>): Promise<T> {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+function getStableFileState(filePath: string, previousSize: number | null, stableChecks: number) {
+    if (!fs.existsSync(filePath)) {
+        return {
+            exists: false,
+            size: null as number | null,
+            stableChecks: 0,
+        };
+    }
+
+    const size = fs.statSync(filePath).size;
+
+    return {
+        exists: true,
+        size,
+        stableChecks: size > 0 && size === previousSize ? stableChecks + 1 : 0,
+    };
+}
+
+async function launchPhotoshopScript(psPath: string, jsxPath: string) {
+    try {
+        await execFileAsync(psPath, [jsxPath], { timeout: 15_000 });
+    } catch {
+        // Expected when Photoshop is already open and Windows hands off via DDE.
+    }
+}
+
+async function isProcessRunning(processName: string) {
+    try {
+        const { stdout } = await execFileAsync("tasklist", ["/fi", `IMAGENAME eq ${processName}`]);
+        return stdout.toLowerCase().includes(processName.toLowerCase());
+    } catch {
+        return false;
+    }
+}
+
 async function runPSJob(imageBase64: string, mimeType: string): Promise<{ imageBase64: string; mimeType: string }> {
     const psPath =
         process.env.PHOTOSHOP_PATH ||
@@ -58,49 +93,77 @@ async function runPSJob(imageBase64: string, mimeType: string): Promise<{ imageB
 
     // Launch Photoshop. If already running, Windows DDE passes the script to it.
     // We fire-and-forget — the actual completion signal comes from the marker file.
-    try {
-        await execFileAsync(psPath, [tempJsxPath], { timeout: 15_000 });
-    } catch {
-        // Expected when PS is already open: the relay process exits with code 1
-        // after handing the script to the running instance via DDE. That's fine.
-    }
+    await launchPhotoshopScript(psPath, tempJsxPath);
 
-    // Give PS a small head-start before we start polling
-    await new Promise((r) => setTimeout(r, 500));
+    // Give PS a brief head-start before we start polling.
+    await new Promise((r) => setTimeout(r, 200));
 
     // Poll for the marker file with a 3-minute ceiling (watchdog)
     const TIMEOUT_MS = 180_000;
-    const POLL_MS = 500;
+    const POLL_MS = 250;
+    const STABLE_OUTPUT_POLLS = 3;
+    const RELAUNCH_AFTER_MS = 10_000;
     const start = Date.now();
+    let completedByStableOutput = false;
+    let previousOutputSize: number | null = null;
+    let stableOutputChecks = 0;
+    let lastProgressAt = Date.now();
+    let relaunched = false;
 
     while (Date.now() - start < TIMEOUT_MS) {
         if (fs.existsSync(markerPath)) break;
+
+        const outputState = getStableFileState(outputPath, previousOutputSize, stableOutputChecks);
+        if (outputState.exists && outputState.size !== previousOutputSize) {
+            lastProgressAt = Date.now();
+        }
+        previousOutputSize = outputState.size;
+        stableOutputChecks = outputState.stableChecks;
+
+        // Some Photoshop actions finish exporting but close before the JSX writes the marker.
+        if (outputState.exists && stableOutputChecks >= STABLE_OUTPUT_POLLS) {
+            completedByStableOutput = true;
+            break;
+        }
+
+        if (!relaunched && Date.now() - lastProgressAt >= RELAUNCH_AFTER_MS) {
+            const photoshopRunning = await isProcessRunning("Photoshop.exe");
+            if (!photoshopRunning) {
+                await launchPhotoshopScript(psPath, tempJsxPath);
+                relaunched = true;
+                lastProgressAt = Date.now();
+                continue;
+            }
+        }
+
         await new Promise((r) => setTimeout(r, POLL_MS));
     }
 
-    if (!fs.existsSync(markerPath)) {
+    if (!fs.existsSync(markerPath) && !completedByStableOutput) {
         fs.rmSync(tempDir, { recursive: true, force: true });
         
         // WATCHDOG: Photoshop has permanently hung. Force kill it so the next image can restart fresh.
         try {
             await execFileAsync("taskkill", ["/f", "/im", "Photoshop.exe"]);
             console.log("Watchdog triggered: Killed frozen Photoshop process.");
-        } catch (e) {
+        } catch {
             console.error("Failed to kill frozen Photoshop (might have already crashed)");
         }
 
         throw new Error("Photoshop timed out (3 min). Process was killed to recover the queue.");
     }
 
-    const markerContent = fs.readFileSync(markerPath, "utf8").trim();
-    if (markerContent.startsWith("error:")) {
-        const psError = markerContent.substring(6);
-        fs.rmSync(tempDir, { recursive: true, force: true });
-        throw new Error(`Photoshop action failed: ${psError}`);
+    if (fs.existsSync(markerPath)) {
+        const markerContent = fs.readFileSync(markerPath, "utf8").trim();
+        if (markerContent.startsWith("error:")) {
+            const psError = markerContent.substring(6);
+            fs.rmSync(tempDir, { recursive: true, force: true });
+            throw new Error(`Photoshop action failed: ${psError}`);
+        }
     }
 
-    // Extra wait to ensure the PNG write is fully flushed before we read it
-    await new Promise((r) => setTimeout(r, 2000));
+    // Short flush wait so we don't add multi-second idle time between images.
+    await new Promise((r) => setTimeout(r, 300));
 
     if (!fs.existsSync(outputPath)) {
         fs.rmSync(tempDir, { recursive: true, force: true });
@@ -125,10 +188,11 @@ export async function POST(req: NextRequest) {
         // Strictly serialise: wait for any in-flight PS job to finish first
         const result = await enqueuePS(() => runPSJob(imageBase64, mimeType || "image/jpeg"));
         return NextResponse.json(result);
-    } catch (error: any) {
-        console.error("PS Surface Blur error:", error.message);
+    } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : "Internal server error";
+        console.error("PS Surface Blur error:", message);
         return NextResponse.json(
-            { error: error.message || "Internal server error" },
+            { error: message },
             { status: 500 }
         );
     }
