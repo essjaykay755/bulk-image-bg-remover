@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { applyLogo } from "@/lib/imageProcessing";
 import Link from "next/link";
 import { Upload, Image as ImageIcon, Download, Trash2, FileImage, ArrowLeft, FolderOpen, Loader2, Sparkles, RefreshCw, X, SlidersHorizontal, Blend, Stamp } from "lucide-react";
@@ -15,6 +15,7 @@ interface ProcessedImage {
     id: string;
     originalFile: File;
     originalUrl: string;
+    transparencyMarkLayerUrl: string | null;
     generatedUrl: string | null;
     generatedBase64: string | null;
     generatedMimeType: string | null;
@@ -24,6 +25,7 @@ interface ProcessedImage {
     actionMessage?: string;
     relativePath?: string;
     fixWrinkles: boolean;
+    fixTransparency: boolean;
     // Surface Blur (Photoshop)
     surfaceBlurUrl: string | null;
     surfaceBlurBase64: string | null;
@@ -38,6 +40,8 @@ export default function AIRetouchPage() {
     const [aiModel, setAiModel] = useState<"gemini-3.1-flash-image-preview" | "gemini-2.5-flash-image">("gemini-3.1-flash-image-preview");
     const [isBlurringAll, setIsBlurringAll] = useState(false);
     const [viewingImageId, setViewingImageId] = useState<string | null>(null);
+    const [isMarkingTransparency, setIsMarkingTransparency] = useState(false);
+    const [markStrokeWidth, setMarkStrokeWidth] = useState(14);
     const viewingImage = images.find(img => img.id === viewingImageId);
 
     // Refs
@@ -45,6 +49,9 @@ export default function AIRetouchPage() {
     const folderInputRef = useRef<HTMLInputElement>(null);
     const logoInputRef = useRef<HTMLInputElement>(null);
     const imagesRef = useRef<ProcessedImage[]>([]);
+    const markCanvasRef = useRef<HTMLCanvasElement>(null);
+    const markPreviewRef = useRef<HTMLDivElement>(null);
+    const isDrawingMarkRef = useRef(false);
     useEffect(() => { imagesRef.current = images; }, [images]);
 
     // Logo state
@@ -81,12 +88,14 @@ export default function AIRetouchPage() {
             id: Math.random().toString(36).substring(7),
             originalFile: file,
             originalUrl: URL.createObjectURL(file),
+            transparencyMarkLayerUrl: null,
             generatedUrl: null,
             generatedBase64: null,
             generatedMimeType: null,
             name: file.name,
             status: "idle",
             fixWrinkles: false,
+            fixTransparency: false,
             surfaceBlurUrl: null,
             surfaceBlurBase64: null,
             surfaceBlurMimeType: null,
@@ -108,6 +117,7 @@ export default function AIRetouchPage() {
                 id: Math.random().toString(36).substring(7),
                 originalFile: file,
                 originalUrl: URL.createObjectURL(file),
+                transparencyMarkLayerUrl: null,
                 generatedUrl: null,
                 generatedBase64: null,
                 generatedMimeType: null,
@@ -115,6 +125,7 @@ export default function AIRetouchPage() {
                 status: "idle" as const,
                 relativePath,
                 fixWrinkles: false,
+                fixTransparency: false,
                 surfaceBlurUrl: null,
                 surfaceBlurBase64: null,
                 surfaceBlurMimeType: null,
@@ -141,9 +152,211 @@ export default function AIRetouchPage() {
         });
     };
 
+    const loadImage = useCallback((src: string): Promise<HTMLImageElement> => {
+        return new Promise((resolve, reject) => {
+            const image = new Image();
+            image.onload = () => resolve(image);
+            image.onerror = reject;
+            image.src = src;
+        });
+    }, []);
+
+    const syncTransparencyMarkCanvas = useCallback(async (markLayerUrl: string | null) => {
+        const canvas = markCanvasRef.current;
+        const preview = markPreviewRef.current;
+        if (!canvas || !preview) return;
+
+        const { width, height } = preview.getBoundingClientRect();
+        if (!width || !height) return;
+
+        const devicePixelRatio = window.devicePixelRatio || 1;
+        canvas.width = Math.round(width * devicePixelRatio);
+        canvas.height = Math.round(height * devicePixelRatio);
+        canvas.style.width = `${width}px`;
+        canvas.style.height = `${height}px`;
+
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return;
+
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.lineCap = "round";
+        ctx.lineJoin = "round";
+        ctx.strokeStyle = "rgba(255, 59, 48, 0.92)";
+        ctx.lineWidth = markStrokeWidth * devicePixelRatio;
+
+        if (markLayerUrl) {
+            const markLayer = await loadImage(markLayerUrl);
+            ctx.drawImage(markLayer, 0, 0, canvas.width, canvas.height);
+        }
+    }, [loadImage, markStrokeWidth]);
+
+    const canvasHasMarks = (canvas: HTMLCanvasElement) => {
+        const ctx = canvas.getContext("2d");
+        if (!ctx) return false;
+
+        const { data } = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        for (let i = 3; i < data.length; i += 4) {
+            if (data[i] !== 0) return true;
+        }
+        return false;
+    };
+
+    const setTransparencyMarkLayer = (imgId: string, markLayerUrl: string | null) => {
+        setImages(prev => prev.map(img =>
+            img.id === imgId ? { ...img, transparencyMarkLayerUrl: markLayerUrl } : img
+        ));
+    };
+
+    const persistTransparencyMarks = (imgId: string) => {
+        const canvas = markCanvasRef.current;
+        if (!canvas) return;
+
+        setTransparencyMarkLayer(
+            imgId,
+            canvasHasMarks(canvas) ? canvas.toDataURL("image/png") : null
+        );
+    };
+
+    const clearTransparencyMarks = async (imgId: string) => {
+        setTransparencyMarkLayer(imgId, null);
+        await new Promise(resolve => requestAnimationFrame(() => resolve(undefined)));
+        await syncTransparencyMarkCanvas(null);
+    };
+
+    const getCanvasPoint = (event: React.PointerEvent<HTMLCanvasElement>) => {
+        const canvas = markCanvasRef.current;
+        if (!canvas) return null;
+
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = canvas.width / rect.width;
+        const scaleY = canvas.height / rect.height;
+        return {
+            x: (event.clientX - rect.left) * scaleX,
+            y: (event.clientY - rect.top) * scaleY,
+        };
+    };
+
+    const handleMarkStart = (event: React.PointerEvent<HTMLCanvasElement>) => {
+        if (!isMarkingTransparency || !viewingImage) return;
+
+        const canvas = markCanvasRef.current;
+        const ctx = canvas?.getContext("2d");
+        const point = getCanvasPoint(event);
+        if (!canvas || !ctx || !point) return;
+
+        event.preventDefault();
+        isDrawingMarkRef.current = true;
+        canvas.setPointerCapture(event.pointerId);
+        ctx.beginPath();
+        ctx.moveTo(point.x, point.y);
+        ctx.lineTo(point.x, point.y);
+        ctx.stroke();
+    };
+
+    const handleMarkMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+        if (!isMarkingTransparency || !isDrawingMarkRef.current) return;
+
+        const ctx = markCanvasRef.current?.getContext("2d");
+        const point = getCanvasPoint(event);
+        if (!ctx || !point) return;
+
+        event.preventDefault();
+        ctx.lineTo(point.x, point.y);
+        ctx.stroke();
+    };
+
+    const handleMarkEnd = (event: React.PointerEvent<HTMLCanvasElement>) => {
+        if (!isDrawingMarkRef.current || !viewingImage) return;
+
+        const canvas = markCanvasRef.current;
+        const ctx = canvas?.getContext("2d");
+        if (canvas) {
+            canvas.releasePointerCapture(event.pointerId);
+        }
+        if (ctx) {
+            ctx.closePath();
+        }
+
+        isDrawingMarkRef.current = false;
+        persistTransparencyMarks(viewingImage.id);
+    };
+
+    useEffect(() => {
+        if (!viewingImage) {
+            setIsMarkingTransparency(false);
+            return;
+        }
+
+        let cancelled = false;
+        const redraw = async () => {
+            if (cancelled) return;
+            try {
+                await syncTransparencyMarkCanvas(viewingImage.transparencyMarkLayerUrl);
+            } catch (error) {
+                console.error("Failed to sync transparency mark canvas", error);
+            }
+        };
+
+        const frameId = requestAnimationFrame(() => {
+            void redraw();
+        });
+        const handleResize = () => {
+            void redraw();
+        };
+
+        window.addEventListener("resize", handleResize);
+
+        return () => {
+            cancelled = true;
+            cancelAnimationFrame(frameId);
+            window.removeEventListener("resize", handleResize);
+        };
+    }, [syncTransparencyMarkCanvas, viewingImage]);
+
+    const buildMarkedGuideBase64 = async (originalUrl: string, markLayerUrl: string): Promise<{ base64: string; mimeType: string }> => {
+        const [baseImage, markLayer] = await Promise.all([
+            loadImage(originalUrl),
+            loadImage(markLayerUrl),
+        ]);
+
+        const canvas = document.createElement("canvas");
+        canvas.width = markLayer.width || baseImage.width;
+        canvas.height = markLayer.height || baseImage.height;
+        const ctx = canvas.getContext("2d");
+        if (!ctx) {
+            throw new Error("Failed to get canvas context");
+        }
+
+        ctx.drawImage(baseImage, 0, 0, canvas.width, canvas.height);
+        ctx.drawImage(markLayer, 0, 0, canvas.width, canvas.height);
+
+        const blob = await new Promise<Blob>((resolve, reject) => {
+            canvas.toBlob((result) => {
+                if (result) resolve(result);
+                else reject(new Error("Failed to create marked guide image"));
+            }, "image/png");
+        });
+
+        return {
+            base64: await new Promise<string>((resolve, reject) => {
+                const reader = new FileReader();
+                reader.onload = () => {
+                    const result = reader.result as string;
+                    resolve(result.split(",")[1]);
+                };
+                reader.onerror = reject;
+                reader.readAsDataURL(blob);
+            }),
+            mimeType: "image/png",
+        };
+    };
+
     // Call the AI API for a single image with retry logic for rate limits
     const generateSingleImage = async (img: ProcessedImage, retryCount = 0): Promise<{ base64: string; mimeType: string }> => {
         const imageBase64 = await fileToBase64(img.originalFile);
+        const markedGuide = img.fixTransparency && img.transparencyMarkLayerUrl
+            ? await buildMarkedGuideBase64(img.originalUrl, img.transparencyMarkLayerUrl)
+            : null;
         const response = await fetch("/api/ai-retouch", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -151,8 +364,11 @@ export default function AIRetouchPage() {
                 imageBase64,
                 mimeType: img.originalFile.type || "image/jpeg",
                 fixWrinkles: img.fixWrinkles,
-                provider: aiProvider,
-                modelName: aiModel,
+                fixTransparency: img.fixTransparency,
+                markedImageBase64: markedGuide?.base64,
+                markedMimeType: markedGuide?.mimeType,
+                provider: img.fixTransparency ? "gemini" : aiProvider,
+                modelName: img.fixTransparency ? "gemini-3.1-flash-image-preview" : aiModel,
             }),
         });
 
@@ -347,6 +563,28 @@ export default function AIRetouchPage() {
     const clearLogo = () => {
         setLogoFile(null);
         setLogoUrl(null);
+    };
+
+    const closeViewer = () => {
+        isDrawingMarkRef.current = false;
+        setIsMarkingTransparency(false);
+        setViewingImageId(null);
+    };
+
+    const toggleImageFlag = (imgId: string, flag: "fixWrinkles" | "fixTransparency") => {
+        setImages(prev => prev.map(img =>
+            img.id === imgId ? { ...img, [flag]: !img[flag] } : img
+        ));
+    };
+
+    const toggleTransparencyMarking = () => {
+        if (!viewingImage) return;
+
+        if (!viewingImage.fixTransparency) {
+            toggleImageFlag(viewingImage.id, "fixTransparency");
+        }
+
+        setIsMarkingTransparency(prev => !prev);
     };
 
     // Download all as ZIP with folder structure
@@ -738,12 +976,18 @@ export default function AIRetouchPage() {
                                                     <p className="font-semibold text-sm truncate text-foreground">{img.name}</p>
                                                 </div>
                                                 <div className="flex items-center gap-1.5">
+                                                    {img.transparencyMarkLayerUrl && (
+                                                        <span
+                                                            className="text-[11px] px-2.5 py-1 rounded-full font-semibold border bg-red-500/12 text-red-500 border-red-500/25"
+                                                            title="This image has saved transparency repair marks"
+                                                        >
+                                                            Marked
+                                                        </span>
+                                                    )}
                                                     <button
                                                         onClick={(e) => {
                                                             e.stopPropagation();
-                                                            setImages(prev => prev.map(p =>
-                                                                p.id === img.id ? { ...p, fixWrinkles: !p.fixWrinkles } : p
-                                                            ));
+                                                            toggleImageFlag(img.id, "fixWrinkles");
                                                         }}
                                                         className={`text-xs px-2.5 py-1 rounded-full font-semibold transition-all border ${img.fixWrinkles
                                                             ? 'bg-accent/15 text-accent border-accent/30'
@@ -754,6 +998,19 @@ export default function AIRetouchPage() {
                                                         {img.fixWrinkles ? '🧹 Wrinkles' : '🧹'}
                                                     </button>
                                                     {/* Surface Blur — only visible after AI generation */}
+                                                    <button
+                                                        onClick={(e) => {
+                                                            e.stopPropagation();
+                                                            toggleImageFlag(img.id, "fixTransparency");
+                                                        }}
+                                                        className={`text-xs px-2.5 py-1 rounded-full font-semibold transition-all border ${img.fixTransparency
+                                                            ? 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30'
+                                                            : 'bg-transparent text-muted-foreground border-border hover:border-emerald-500/30 hover:text-emerald-500'
+                                                            }`}
+                                                        title="Tell AI to repair accidental transparent holes in the product"
+                                                    >
+                                                        {img.fixTransparency ? 'Fix transparency' : 'Transparency'}
+                                                    </button>
                                                     {img.status === "done" && (
                                                         <button
                                                             onClick={(e) => {
@@ -854,7 +1111,7 @@ export default function AIRetouchPage() {
                             animate={{ opacity: 1 }}
                             exit={{ opacity: 0 }}
                             className="fixed inset-0 z-50 flex items-center justify-center p-4 sm:p-6 md:p-12 bg-background/80 backdrop-blur-xl"
-                            onClick={() => setViewingImageId(null)}
+                            onClick={closeViewer}
                         >
                             <motion.div
                                 initial={{ scale: 0.95, y: 20 }}
@@ -871,7 +1128,56 @@ export default function AIRetouchPage() {
                                         {viewingImage.status === "idle" && <span className="w-2 h-2 rounded-full bg-muted-foreground/30" />}
                                         <h3 className="font-bold text-foreground truncate">{viewingImage.name}</h3>
                                     </div>
-                                    <div className="flex items-center gap-2">
+                                    <div className="flex items-center gap-2 flex-wrap justify-end">
+                                        {viewingImage.transparencyMarkLayerUrl && (
+                                            <span className="text-xs px-3 py-2 rounded-full font-semibold border bg-red-500/12 text-red-500 border-red-500/25">
+                                                Marked
+                                            </span>
+                                        )}
+                                        <button
+                                            onClick={() => toggleImageFlag(viewingImage.id, "fixWrinkles")}
+                                            className={`text-xs px-3 py-2 rounded-full font-semibold transition-all border ${viewingImage.fixWrinkles
+                                                ? 'bg-accent/15 text-accent border-accent/30'
+                                                : 'bg-transparent text-muted-foreground border-border hover:border-accent/30 hover:text-accent'
+                                                }`}
+                                            title="Toggle wrinkle smoothing for this image"
+                                        >
+                                            Wrinkles
+                                        </button>
+                                        <button
+                                            onClick={() => {
+                                                if (viewingImage.fixTransparency && isMarkingTransparency) {
+                                                    setIsMarkingTransparency(false);
+                                                }
+                                                toggleImageFlag(viewingImage.id, "fixTransparency");
+                                            }}
+                                            className={`text-xs px-3 py-2 rounded-full font-semibold transition-all border ${viewingImage.fixTransparency
+                                                ? 'bg-emerald-500/15 text-emerald-500 border-emerald-500/30'
+                                                : 'bg-transparent text-muted-foreground border-border hover:border-emerald-500/30 hover:text-emerald-500'
+                                                }`}
+                                            title="Tell AI to repair accidental transparent holes in the product"
+                                        >
+                                            Fix transparency
+                                        </button>
+                                        <button
+                                            onClick={toggleTransparencyMarking}
+                                            className={`text-xs px-3 py-2 rounded-full font-semibold transition-all border ${isMarkingTransparency
+                                                ? 'bg-red-500/15 text-red-500 border-red-500/30'
+                                                : 'bg-transparent text-muted-foreground border-border hover:border-red-500/30 hover:text-red-500'
+                                                }`}
+                                            title="Mark exact transparency problem areas with a red guide for AI"
+                                        >
+                                            {isMarkingTransparency ? "Marking areas" : "Mark areas"}
+                                        </button>
+                                        {viewingImage.transparencyMarkLayerUrl && (
+                                            <button
+                                                onClick={() => void clearTransparencyMarks(viewingImage.id)}
+                                                className="text-xs px-3 py-2 rounded-full font-semibold transition-all border bg-transparent text-muted-foreground border-border hover:border-red-500/30 hover:text-red-500"
+                                                title="Clear saved transparency guide marks"
+                                            >
+                                                Clear marks
+                                            </button>
+                                        )}
                                         {viewingImage.status !== "generating" && (
                                             <button
                                                 onClick={() => handleGenerateSingle(viewingImage.id)}
@@ -888,7 +1194,7 @@ export default function AIRetouchPage() {
                                             </div>
                                         )}
                                         <button
-                                            onClick={() => setViewingImageId(null)}
+                                            onClick={closeViewer}
                                             className="p-2 hover:bg-muted/50 rounded-full transition-colors text-muted-foreground hover:text-foreground"
                                         >
                                             <X className="w-5 h-5" />
@@ -901,9 +1207,68 @@ export default function AIRetouchPage() {
                                     <div className={`grid gap-6 ${viewingImage.surfaceBlurUrl ? 'grid-cols-1 md:grid-cols-3' : viewingImage.generatedUrl ? 'grid-cols-1 md:grid-cols-2' : 'grid-cols-1'}`}>
                                         {/* Original */}
                                         <div className="space-y-3">
-                                            <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Original</span>
-                                            <div className="rounded-xl overflow-hidden border border-border/50 checkerboard">
-                                                <img src={viewingImage.originalUrl} alt="Original" className="w-full h-auto object-contain max-h-[65vh]" />
+                                            <div className="flex items-center justify-between gap-3">
+                                                <span className="text-xs font-bold uppercase tracking-wider text-muted-foreground">Original</span>
+                                                <div className="flex items-center gap-3">
+                                                    {viewingImage.transparencyMarkLayerUrl && (
+                                                        <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-red-500">
+                                                            Marked
+                                                        </span>
+                                                    )}
+                                                    <div className="flex items-center gap-3 rounded-full border border-border/60 bg-background/70 px-4 py-2">
+                                                        <div className="flex items-center gap-2 text-xs font-semibold text-muted-foreground">
+                                                            <SlidersHorizontal className="w-3.5 h-3.5" />
+                                                            Stroke
+                                                        </div>
+                                                        <input
+                                                            type="range"
+                                                            min="6"
+                                                            max="32"
+                                                            step="1"
+                                                            value={markStrokeWidth}
+                                                            onChange={(e) => setMarkStrokeWidth(parseInt(e.target.value))}
+                                                            className="w-24 h-1 bg-border rounded-lg appearance-none cursor-pointer accent-red-500"
+                                                            title="Adjust red marker stroke width"
+                                                        />
+                                                        <span className="w-8 text-right text-xs font-mono text-foreground">
+                                                            {markStrokeWidth}
+                                                        </span>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                            <div
+                                                ref={markPreviewRef}
+                                                className={`relative rounded-xl overflow-hidden border checkerboard ${isMarkingTransparency
+                                                    ? 'border-red-500/40 shadow-lg shadow-red-500/10'
+                                                    : 'border-border/50'
+                                                    }`}
+                                            >
+                                                <img
+                                                    src={viewingImage.originalUrl}
+                                                    alt="Original"
+                                                    className="block w-full h-auto object-contain max-h-[65vh]"
+                                                    draggable={false}
+                                                    onLoad={() => {
+                                                        void syncTransparencyMarkCanvas(viewingImage.transparencyMarkLayerUrl);
+                                                    }}
+                                                />
+                                                <canvas
+                                                    ref={markCanvasRef}
+                                                    onPointerDown={handleMarkStart}
+                                                    onPointerMove={handleMarkMove}
+                                                    onPointerUp={handleMarkEnd}
+                                                    onPointerCancel={handleMarkEnd}
+                                                    onPointerLeave={handleMarkEnd}
+                                                    className={`absolute inset-0 touch-none ${isMarkingTransparency
+                                                        ? 'cursor-crosshair pointer-events-auto'
+                                                        : 'pointer-events-none'
+                                                        }`}
+                                                />
+                                                {isMarkingTransparency && (
+                                                    <div className="absolute left-3 top-3 rounded-full bg-red-500/90 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.18em] text-white shadow-lg">
+                                                        Paint damaged area
+                                                    </div>
+                                                )}
                                             </div>
                                         </div>
 

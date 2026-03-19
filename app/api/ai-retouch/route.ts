@@ -3,7 +3,7 @@ import { GoogleGenAI } from "@google/genai";
 
 const PROMPT = `You are an expert product photography retoucher. Edit this product image to look like a real studio photograph.
 
-CRITICAL RULES — you must follow ALL of these:
+CRITICAL RULES - you must follow ALL of these:
 
 GROUNDING: The product must rest firmly on the surface. It must NOT float or hover. Add a realistic contact shadow directly beneath the product where it touches the surface. The bottom edge of the product must make full contact with the surface.
 
@@ -32,9 +32,53 @@ WHAT NOT TO DO:
 
 Output a single high-quality image.`;
 
+const FIX_TRANSPARENCY_PROMPT = `ADDITIONAL INSTRUCTION - FIX TRANSPARENCY:
+
+Act as an expert in digital image restoration specializing in correcting transparency anomalies in product photography, especially wallet images where automated background removal has accidentally deleted white or light product elements.
+
+Purpose:
+- Fix transparency anomalies only.
+- Restore missing or partially deleted white/light elements such as banknotes, logos, dummy ID cards, labels, and similar printed inserts that belong to the product scene.
+- Keep the wallet, box, background, composition, and all correctly processed areas unchanged.
+
+Image analysis:
+- Carefully inspect the image for areas where background removal mistakenly removed internal white or light-colored product details.
+- Distinguish between the intended outer background and internal product elements that must remain visible.
+
+Restoration rules:
+- Re-generate or fill in only the missing product pixels in the damaged areas.
+- Make the restoration seamless and consistent with the existing texture, lighting, sharpness, and perspective.
+- Do not modify the wallet structure, box structure, stitching, engravings, embossing, or any physical geometry.
+- If there is engraving, do not touch it.
+- Maintain the original note arrangement exactly. Do not change the position, angle, overlap, or stack order of the currency.
+- Restore ID cards, notes, logos, and white printed regions as solid, natural, opaque objects. They must not look transparent, ghosted, faded, or see-through.
+- For gift box logos specifically: detect any areas inside the logo where the box color or background color is bleeding through because of transparency damage, and replace that bleed-through with solid white. The logo should read as a clean white printed mark, not a translucent logo tinted by the box or background color.
+- If currency denominations are unclear or partially erased, reconstruct missing sections using believable visual cues from common Indian Rupee notes such as 500, 200, 100, or 50, while preserving the visible arrangement in the image.
+- Strictly do not modify any existing physical structures of the wallet or product. Only fill transparency anomalies.
+
+Quality checks:
+- Compare the repaired result to the provided image and ensure that all transparency anomalies are fixed.
+- Do not introduce new artifacts.
+- Do not repaint the whole image.
+- Do not change unaffected regions.
+- Do not alter the added background.
+- Do not make the product look washed out or semi-transparent.
+- For gift box logos, do not leave blue, grey, or box-colored pixels showing through the white logo shape.
+
+Return one corrected image with the transparency issues fixed and everything else preserved as closely as possible.`;
+
 export async function POST(req: NextRequest) {
     try {
-        const { imageBase64, mimeType, fixWrinkles, provider, modelName } = await req.json();
+        const {
+            imageBase64,
+            mimeType,
+            fixWrinkles,
+            fixTransparency,
+            markedImageBase64,
+            markedMimeType,
+            provider,
+            modelName,
+        } = await req.json();
 
         if (!imageBase64 || !mimeType) {
             return NextResponse.json(
@@ -60,27 +104,47 @@ export async function POST(req: NextRequest) {
 
         let finalPrompt = PROMPT;
         if (fixWrinkles) {
-            finalPrompt += `\n\nADDITIONAL INSTRUCTION — FIX WRINKLES: The product has heavy wrinkles and creases on its leather/fabric surface. Smooth out these wrinkles significantly while keeping the natural leather grain texture intact. The surface should look like a brand-new, unwrinkled product fresh from the factory. Remove deep creases, folds, and deformation marks, but preserve natural material texture (grain, pores, stitching).`;
+            finalPrompt += `\n\nADDITIONAL INSTRUCTION - FIX WRINKLES: The product has heavy wrinkles and creases on its leather/fabric surface. Smooth out these wrinkles significantly while keeping the natural leather grain texture intact. The surface should look like a brand-new, unwrinkled product fresh from the factory. Remove deep creases, folds, and deformation marks, but preserve natural material texture (grain, pores, stitching).`;
+        }
+        if (fixTransparency) {
+            finalPrompt += `\n\n${FIX_TRANSPARENCY_PROMPT}`;
         }
 
         const ai = new GoogleGenAI({
             apiKey,
         });
 
+        const parts: Array<
+            { text: string } |
+            { inlineData: { mimeType: string; data: string } }
+        > = [
+            { text: finalPrompt },
+            {
+                inlineData: {
+                    mimeType,
+                    data: imageBase64,
+                },
+            },
+        ];
+
+        if (fixTransparency && markedImageBase64 && markedMimeType) {
+            parts.push({
+                text: "A second reference image is attached with red manual markings. Treat every red-marked area as an exact transparency-damage region that must be repaired. Prioritize those marked regions and their immediate edges. Do not repaint or reinterpret unmarked regions unless strictly necessary to blend the repair naturally.",
+            });
+            parts.push({
+                inlineData: {
+                    mimeType: markedMimeType,
+                    data: markedImageBase64,
+                },
+            });
+        }
+
         const response = await ai.models.generateContent({
             model: modelName || "gemini-3.1-flash-image-preview",
             contents: [
                 {
                     role: "user",
-                    parts: [
-                        { text: finalPrompt },
-                        {
-                            inlineData: {
-                                mimeType,
-                                data: imageBase64,
-                            },
-                        },
-                    ],
+                    parts,
                 },
             ],
             config: {
@@ -88,17 +152,15 @@ export async function POST(req: NextRequest) {
             },
         });
 
-        // Extract the generated image from the response
-        const parts = response.candidates?.[0]?.content?.parts;
-        if (!parts) {
+        const responseParts = response.candidates?.[0]?.content?.parts;
+        if (!responseParts) {
             return NextResponse.json(
                 { error: "No response from AI model" },
                 { status: 500 }
             );
         }
 
-        // Find the image part in the response
-        for (const part of parts) {
+        for (const part of responseParts) {
             if (part.inlineData?.data) {
                 return NextResponse.json({
                     imageBase64: part.inlineData.data,
@@ -107,19 +169,17 @@ export async function POST(req: NextRequest) {
             }
         }
 
-        // If no image was generated, return text response for debugging
-        const textParts = parts.filter((p: any) => p.text).map((p: any) => p.text);
+        const textParts = responseParts.flatMap((part) => part.text ? [part.text] : []);
         return NextResponse.json(
             { error: `No image generated. Model response: ${textParts.join(" ")}` },
             { status: 500 }
         );
-    } catch (error: any) {
+    } catch (error: unknown) {
         console.error("AI Retouch error:", error);
-        
-        let status = 500;
-        let errorMessage = error.message || "Internal server error";
 
-        // Handle stringified JSON errors from SDK
+        let status = 500;
+        let errorMessage = error instanceof Error ? error.message : "Internal server error";
+
         if (typeof errorMessage === "string" && errorMessage.startsWith("{")) {
             try {
                 const parsed = JSON.parse(errorMessage);
@@ -127,12 +187,18 @@ export async function POST(req: NextRequest) {
                     errorMessage = parsed.error.message || errorMessage;
                     if (parsed.error.code === 429) status = 429;
                 }
-            } catch (e) {
+            } catch {
                 // Ignore parse errors
             }
         }
-        
-        if (error.status === 429 || errorMessage.includes("429")) {
+
+        if (
+            (typeof error === "object" &&
+                error !== null &&
+                "status" in error &&
+                error.status === 429) ||
+            errorMessage.includes("429")
+        ) {
             status = 429;
         }
 
