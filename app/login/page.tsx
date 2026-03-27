@@ -50,7 +50,7 @@ export default function LoginPage() {
             >
                 <div className="text-center mb-10">
                     <h1 className="text-5xl font-extrabold tracking-tighter leading-none text-foreground mb-4">
-                        Lumina
+                        Swamp
                     </h1>
                     <p className="text-muted-foreground text-lg">
                         Professional Image Suite

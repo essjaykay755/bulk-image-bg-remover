@@ -3,7 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import { removeWhiteBackground, compositeImage, BgRemovalMode } from "@/lib/imageProcessing";
 import Link from "next/link";
-import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, ArrowLeft, FolderOpen, Loader2, X, CheckSquare, Square } from "lucide-react";
+import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, ArrowLeft, FolderOpen, Loader2, CheckSquare, Square } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import JSZip from "jszip";
 import { saveAs } from "file-saver";
@@ -19,6 +19,7 @@ interface ProcessedImage {
   compositedUrl: string | null;
   name: string;
   status: "processing" | "done" | "error";
+  bgRemovalSource?: "auto" | "photoshop-auto" | "photoshop-manual" | null;
   customScale?: number;
   customX?: number;
   customY?: number;
@@ -27,15 +28,17 @@ interface ProcessedImage {
 
 export default function Home() {
   const [images, setImages] = useState<ProcessedImage[]>([]);
-  const [bgImageFile, setBgImageFile] = useState<File | null>(null);
+  const [, setBgImageFile] = useState<File | null>(null);
   const [bgImageUrl, setBgImageUrl] = useState<string | null>(null);
   const [tolerance, setTolerance] = useState<number>(20);
   const [subjectScale, setSubjectScale] = useState<number>(1.0);
   const [subjectX, setSubjectX] = useState<number>(0);
   const [subjectY, setSubjectY] = useState<number>(0);
-  const [isProcessingAll, setIsProcessingAll] = useState(false);
+  const [, setIsProcessingAll] = useState(false);
   const [editingImageId, setEditingImageId] = useState<string | null>(null);
   const [zipFileName, setZipFileName] = useState("processed_images");
+  const [bgRemovalEnabled, setBgRemovalEnabled] = useState(false);
+  const [psBgRemovalEnabled, setPsBgRemovalEnabled] = useState(false);
   const [bgRemovalMode, setBgRemovalMode] = useState<BgRemovalMode>("ai");
 
   // ZIP progress state
@@ -88,6 +91,81 @@ export default function Home() {
   };
 
   const activeEditingImage = images.find(img => img.id === editingImageId);
+  const activeAutoBgRemovalSource = psBgRemovalEnabled
+    ? "photoshop-auto"
+    : bgRemovalEnabled
+      ? "auto"
+      : null;
+
+  const getPlacementForImage = (img: ProcessedImage) => ({
+    scale: img.customScale !== undefined ? img.customScale : subjectScale,
+    x: img.customX !== undefined ? img.customX : subjectX,
+    y: img.customY !== undefined ? img.customY : subjectY,
+  });
+
+  const buildBgRemovalOutput = async (img: ProcessedImage, transparentUrl: string) => {
+    let compositedUrl: string | null = null;
+
+    if (bgImageUrl) {
+      const { scale, x, y } = getPlacementForImage(img);
+      compositedUrl = await compositeImage(transparentUrl, bgImageUrl, scale, x, y);
+    }
+
+    return { transparentUrl, compositedUrl };
+  };
+
+  const fileToBase64 = async (file: File) => {
+    const reader = new FileReader();
+    const base64Promise = new Promise<string>((resolve, reject) => {
+      reader.onloadend = () => {
+        const result = reader.result;
+        if (typeof result !== "string") {
+          reject(new Error("Failed to read file"));
+          return;
+        }
+        resolve(result.split(",")[1]);
+      };
+      reader.onerror = () => reject(reader.error || new Error("Failed to read file"));
+    });
+
+    reader.readAsDataURL(file);
+    return base64Promise;
+  };
+
+  const runPhotoshopBgRemoval = async (imageFile: File) => {
+    const imageBase64 = await fileToBase64(imageFile);
+    const response = await fetch("/api/run-ps", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "bgRemoval",
+        imageBase64,
+        mimeType: imageFile.type || "image/png",
+      }),
+    });
+
+    if (!response.ok) {
+      const err = await response.json();
+      throw new Error(err.error || `HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    const blob = await fetch(`data:${data.mimeType};base64,${data.imageBase64}`).then(r => r.blob());
+    return URL.createObjectURL(blob);
+  };
+
+  const applyBgRemoval = async (img: ProcessedImage, source: "auto" | "photoshop-auto" | "photoshop-manual") => {
+    const transparentUrl = source === "photoshop-auto" || source === "photoshop-manual"
+      ? await runPhotoshopBgRemoval(img.originalFile)
+      : await removeWhiteBackground(img.originalFile, tolerance, bgRemovalMode);
+
+    const { compositedUrl } = await buildBgRemovalOutput(img, transparentUrl);
+    return {
+      transparentUrl,
+      compositedUrl,
+      bgRemovalSource: source,
+    };
+  };
 
   // Debounced effect for individual recompositions
   useEffect(() => {
@@ -124,13 +202,14 @@ export default function Home() {
   const foregroundInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const backgroundInputRef = useRef<HTMLInputElement>(null);
+  const folderPickerAttributes: Record<string, string> = { webkitdirectory: "", directory: "" };
 
   // Handle Foreground Images Upload
   const handleForegroundUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.length) return;
 
-    setIsProcessingAll(true);
     const files = Array.from(e.target.files);
+    const shouldAutoProcess = activeAutoBgRemovalSource !== null;
 
     const newImages: ProcessedImage[] = files.map(file => ({
       id: Math.random().toString(36).substring(7),
@@ -139,10 +218,17 @@ export default function Home() {
       transparentUrl: null,
       compositedUrl: null,
       name: file.name,
-      status: "processing"
+      status: shouldAutoProcess ? "processing" : "done",
+      bgRemovalSource: null,
     }));
 
     setImages(prev => [...prev, ...newImages]);
+    if (!shouldAutoProcess) {
+      e.target.value = "";
+      return;
+    }
+
+    setIsProcessingAll(true);
     const total = newImages.length;
     setBatchProgress({ label: "Removing Backgrounds", current: 0, total, currentFile: "" });
 
@@ -151,13 +237,9 @@ export default function Home() {
       setBatchProgress({ label: "Removing Backgrounds", current: i, total, currentFile: img.name });
       await yieldToMain();
       try {
-        const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance, bgRemovalMode);
-        let compositedUrl = null;
-        if (bgImageUrl) {
-          compositedUrl = await compositeImage(transparentUrl, bgImageUrl, subjectScale, subjectX, subjectY);
-        }
+        const { transparentUrl, compositedUrl, bgRemovalSource } = await applyBgRemoval(img, activeAutoBgRemovalSource || "auto");
         setImages(prev => prev.map(p =>
-          p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
+          p.id === img.id ? { ...p, transparentUrl, compositedUrl, bgRemovalSource, status: "done" } : p
         ));
       } catch (err) {
         console.error("Error processing " + img.name, err);
@@ -169,14 +251,15 @@ export default function Home() {
     }
     setBatchProgress(null);
     setIsProcessingAll(false);
+    e.target.value = "";
   };
 
   // Handle Folder Upload (preserves subfolder structure via webkitdirectory)
   const handleFolderUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files?.length) return;
 
-    setIsProcessingAll(true);
     const files = Array.from(e.target.files).filter(f => f.type.startsWith("image/"));
+    const shouldAutoProcess = activeAutoBgRemovalSource !== null;
 
     // webkitRelativePath looks like "RootFolder/Subfolder/image.jpg"
     // We strip the root folder name so relativePath = "Subfolder/image.jpg"
@@ -190,12 +273,19 @@ export default function Home() {
         transparentUrl: null,
         compositedUrl: null,
         name: file.name,
-        status: "processing" as const,
+        status: shouldAutoProcess ? "processing" as const : "done" as const,
+        bgRemovalSource: null,
         relativePath,
       };
     });
 
     setImages(prev => [...prev, ...newImages]);
+    if (!shouldAutoProcess) {
+      e.target.value = "";
+      return;
+    }
+
+    setIsProcessingAll(true);
     const total = newImages.length;
     setBatchProgress({ label: "Removing Backgrounds", current: 0, total, currentFile: "" });
 
@@ -204,13 +294,9 @@ export default function Home() {
       setBatchProgress({ label: "Removing Backgrounds", current: i, total, currentFile: img.relativePath || img.name });
       await yieldToMain();
       try {
-        const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance, bgRemovalMode);
-        let compositedUrl = null;
-        if (bgImageUrl) {
-          compositedUrl = await compositeImage(transparentUrl, bgImageUrl, subjectScale, subjectX, subjectY);
-        }
+        const { transparentUrl, compositedUrl, bgRemovalSource } = await applyBgRemoval(img, activeAutoBgRemovalSource || "auto");
         setImages(prev => prev.map(p =>
-          p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
+          p.id === img.id ? { ...p, transparentUrl, compositedUrl, bgRemovalSource, status: "done" } : p
         ));
       } catch (err) {
         console.error("Error processing " + img.name, err);
@@ -454,42 +540,68 @@ export default function Home() {
     return () => clearTimeout(timeout);
   }, [subjectScale, subjectX, subjectY]);
 
-  // Trigger re-process when tolerance changes
+  // Trigger background removal when the auto-removal stage is enabled or reconfigured
   useEffect(() => {
     if (images.length === 0) return;
+
+    if (!activeAutoBgRemovalSource) {
+      setImages(prev => prev.map(img =>
+        img.bgRemovalSource === "auto" || img.bgRemovalSource === "photoshop-auto"
+          ? { ...img, transparentUrl: null, compositedUrl: null, bgRemovalSource: null, status: "done" }
+          : img
+      ));
+      return;
+    }
+
     const reprocess = async () => {
       setIsProcessingAll(true);
       const currentImages = imagesRef.current;
-      setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
-      for (let i = 0; i < currentImages.length; i += BATCH_SIZE) {
-        const batch = currentImages.slice(i, i + BATCH_SIZE);
+      const toProcess = currentImages.filter(img =>
+        !img.transparentUrl ||
+        (
+          img.bgRemovalSource !== "photoshop-manual" &&
+          img.bgRemovalSource !== activeAutoBgRemovalSource
+        )
+      );
+
+      if (toProcess.length === 0) {
+        setIsProcessingAll(false);
+        return;
+      }
+
+      setBatchProgress({ label: "Removing Backgrounds", current: 0, total: toProcess.length, currentFile: "" });
+      setImages(prev => prev.map(img =>
+        (!img.transparentUrl || img.bgRemovalSource === "auto")
+          ? { ...img, status: "processing" }
+          : img
+      ));
+
+      let processed = 0;
+      for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
+        const batch = toProcess.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(async (img) => {
           try {
-            const transparentUrl = await removeWhiteBackground(img.originalFile, tolerance, bgRemovalMode);
-            let compositedUrl = null;
-            if (bgImageUrl) {
-              const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
-              const actX = img.customX !== undefined ? img.customX : subjectX;
-              const actY = img.customY !== undefined ? img.customY : subjectY;
-              compositedUrl = await compositeImage(transparentUrl, bgImageUrl, actScale, actX, actY);
-            }
+            const { transparentUrl, compositedUrl, bgRemovalSource } = await applyBgRemoval(img, activeAutoBgRemovalSource || "auto");
             setImages(prev => prev.map(p =>
-              p.id === img.id ? { ...p, transparentUrl, compositedUrl, status: "done" } : p
+              p.id === img.id ? { ...p, transparentUrl, compositedUrl, bgRemovalSource, status: "done" } : p
             ));
           } catch (e) {
             setImages(prev => prev.map(p =>
               p.id === img.id ? { ...p, status: "error" } : p
             ));
           }
+          processed++;
+          setBatchProgress({ label: "Removing Backgrounds", current: processed, total: toProcess.length, currentFile: img.name });
         }));
         await yieldToMain();
       }
+      setBatchProgress(null);
       setIsProcessingAll(false);
     };
 
     const timeout = setTimeout(reprocess, 800);
     return () => clearTimeout(timeout);
-  }, [tolerance, bgRemovalMode]);
+  }, [activeAutoBgRemovalSource, tolerance, bgRemovalMode]);
 
   return (
     <div className="min-h-[100dvh] bg-background text-foreground font-sans selection:bg-accent/30 selection:text-accent-foreground p-6 sm:p-8 md:p-12 transition-colors duration-500">
@@ -577,7 +689,7 @@ export default function Home() {
                     ref={folderInputRef}
                     type="file" accept="image/*" className="hidden"
                     onChange={handleFolderUpload}
-                    {...{ webkitdirectory: "", directory: "" } as any}
+                    {...folderPickerAttributes}
                   />
                   <FolderOpen className="w-7 h-7 mb-3 text-muted-foreground group-hover:text-accent transition-colors" />
                   <p className="font-semibold text-foreground text-sm">Upload Folder</p>
@@ -635,12 +747,34 @@ export default function Home() {
 
             {/* Settings Node */}
             <div className="liquid-glass p-8 rounded-[2.5rem]">
-              <h3 className="text-lg font-bold flex items-center gap-3 mb-8 text-foreground">
-                <Settings2 className="w-5 h-5 text-muted-foreground" />
-                Engine Config
-              </h3>
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-lg font-bold flex items-center gap-3 text-foreground">
+                  <Settings2 className="w-5 h-5 text-muted-foreground" />
+                  BG Removal
+                </h3>
+                <button
+                  onClick={() => {
+                    const next = !bgRemovalEnabled;
+                    setBgRemovalEnabled(next);
+                    if (next) setPsBgRemovalEnabled(false);
+                  }}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${bgRemovalEnabled ? 'bg-accent' : 'bg-muted-foreground/30'}`}
+                >
+                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${bgRemovalEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                </button>
+              </div>
 
-              <div className="space-y-8">
+              {!bgRemovalEnabled ? (
+                <div className="space-y-3 pt-4 border-t border-border/50">
+                  <p className="text-sm text-muted-foreground">
+                    Uploads stay untouched until you enable background removal.
+                  </p>
+                  <p className="text-xs text-muted-foreground/80 leading-relaxed">
+                    You can still trigger Photoshop background removal on individual images from the gallery.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-8 pt-6 border-t border-border/50">
                 {/* Engine Mode Toggle */}
                 <div>
                   <label className="text-sm font-semibold text-foreground block mb-3">Removal Engine</label>
@@ -692,97 +826,137 @@ export default function Home() {
                   </div>
                 )}
 
-                {bgImageUrl && (
-                  <div className="pt-6 mt-6 border-t border-border/50 space-y-5">
-                    <div className="flex items-center justify-between pb-2">
-                      <label className="text-sm font-bold tracking-tight text-foreground flex items-center gap-2">
-                        Placement
-                      </label>
-                      <div className="flex gap-1.5">
-                        {[
-                          { label: "Preset 1", scale: 0.55, x: 0, y: 14 },
-                          { label: "Preset 2", scale: 0.65, x: 0, y: 14 }
-                        ].map(preset => (
-                          <button
-                            key={preset.label}
-                            onClick={() => applyGlobalPreset(preset.scale, preset.x, preset.y)}
-                            className="text-[10px] font-semibold uppercase tracking-wider bg-background hover:bg-muted text-muted-foreground hover:text-foreground px-2 py-1 rounded border border-border transition-colors shadow-sm"
-                          >
-                            {preset.label}
-                          </button>
-                        ))}
-                      </div>
-                    </div>
-
-                    {/* Scale */}
-                    <div className="space-y-2">
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs font-medium text-muted-foreground">Scale</span>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="number" min="0.1" max="3.0" step="0.05"
-                            value={subjectScale}
-                            onChange={(e) => setSubjectScale(parseFloat(e.target.value) || 1)}
-                            className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
-                          />
-                          <span className="text-muted-foreground text-xs font-mono">x</span>
-                        </div>
-                      </div>
-                      <input
-                        type="range" min="0.1" max="3.0" step="0.05"
-                        value={subjectScale}
-                        onChange={(e) => setSubjectScale(parseFloat(e.target.value))}
-                        className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
-                      />
-                    </div>
-
-                    {/* Position X */}
-                    <div className="space-y-2">
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs font-medium text-muted-foreground">Pos X</span>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="number" min="-100" max="100"
-                            value={subjectX}
-                            onChange={(e) => setSubjectX(parseInt(e.target.value) || 0)}
-                            className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
-                          />
-                          <span className="text-muted-foreground text-xs font-mono">%</span>
-                        </div>
-                      </div>
-                      <input
-                        type="range" min="-100" max="100"
-                        value={subjectX}
-                        onChange={(e) => setSubjectX(parseInt(e.target.value))}
-                        className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
-                      />
-                    </div>
-
-                    {/* Position Y */}
-                    <div className="space-y-2">
-                      <div className="flex justify-between items-center">
-                        <span className="text-xs font-medium text-muted-foreground">Pos Y</span>
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="number" min="-100" max="100"
-                            value={subjectY}
-                            onChange={(e) => setSubjectY(parseInt(e.target.value) || 0)}
-                            className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
-                          />
-                          <span className="text-muted-foreground text-xs font-mono">%</span>
-                        </div>
-                      </div>
-                      <input
-                        type="range" min="-100" max="100"
-                        value={subjectY}
-                        onChange={(e) => setSubjectY(parseInt(e.target.value))}
-                        className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
-                      />
-                    </div>
-                  </div>
-                )}
               </div>
+              )}
             </div>
+
+            <div className="liquid-glass p-8 rounded-[2.5rem] transition-all">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-lg font-bold flex items-center gap-3 text-foreground">
+                  <Layers className="w-5 h-5 text-accent" />
+                  PS BG Removal
+                </h3>
+                <button
+                  onClick={() => {
+                    const next = !psBgRemovalEnabled;
+                    setPsBgRemovalEnabled(next);
+                    if (next) setBgRemovalEnabled(false);
+                  }}
+                  className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${psBgRemovalEnabled ? 'bg-accent' : 'bg-muted-foreground/30'}`}
+                >
+                  <span className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${psBgRemovalEnabled ? 'translate-x-6' : 'translate-x-1'}`} />
+                </button>
+              </div>
+
+              {psBgRemovalEnabled ? (
+                <div className="space-y-4 pt-4 border-t border-border/50">
+                  <p className="text-sm text-muted-foreground">
+                    New uploads will run through Adobe Photoshop using your BG Removal action.
+                  </p>
+                  <p className="text-xs text-yellow-500/80 font-medium">
+                    Photoshop processing is slower than the local remover and runs one image at a time.
+                  </p>
+                </div>
+              ) : (
+                <div className="space-y-3 pt-4 border-t border-border/50">
+                  <p className="text-sm text-muted-foreground">
+                    Toggle this on to use the Photoshop BG Removal action for uploaded images.
+                  </p>
+                  <p className="text-xs text-muted-foreground/80 leading-relaxed">
+                    You can also use the per-image PS button in the gallery at any time.
+                  </p>
+                </div>
+              )}
+            </div>
+
+            {bgImageUrl && (
+              <div className="liquid-glass p-8 rounded-[2.5rem] transition-all">
+                <div className="flex items-center justify-between pb-2 mb-6">
+                  <h3 className="text-lg font-bold tracking-tight text-foreground">
+                    Placement
+                  </h3>
+                  <div className="flex gap-1.5">
+                    {[
+                      { label: "Preset 1", scale: 0.55, x: 0, y: 14 },
+                      { label: "Preset 2", scale: 0.65, x: 0, y: 14 }
+                    ].map(preset => (
+                      <button
+                        key={preset.label}
+                        onClick={() => applyGlobalPreset(preset.scale, preset.x, preset.y)}
+                        className="text-[10px] font-semibold uppercase tracking-wider bg-background hover:bg-muted text-muted-foreground hover:text-foreground px-2 py-1 rounded border border-border transition-colors shadow-sm"
+                      >
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="space-y-5">
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-medium text-muted-foreground">Scale</span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number" min="0.1" max="3.0" step="0.05"
+                          value={subjectScale}
+                          onChange={(e) => setSubjectScale(parseFloat(e.target.value) || 1)}
+                          className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                        />
+                        <span className="text-muted-foreground text-xs font-mono">x</span>
+                      </div>
+                    </div>
+                    <input
+                      type="range" min="0.1" max="3.0" step="0.05"
+                      value={subjectScale}
+                      onChange={(e) => setSubjectScale(parseFloat(e.target.value))}
+                      className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-medium text-muted-foreground">Pos X</span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number" min="-100" max="100"
+                          value={subjectX}
+                          onChange={(e) => setSubjectX(parseInt(e.target.value) || 0)}
+                          className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                        />
+                        <span className="text-muted-foreground text-xs font-mono">%</span>
+                      </div>
+                    </div>
+                    <input
+                      type="range" min="-100" max="100"
+                      value={subjectX}
+                      onChange={(e) => setSubjectX(parseInt(e.target.value))}
+                      className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
+                    />
+                  </div>
+
+                  <div className="space-y-2">
+                    <div className="flex justify-between items-center">
+                      <span className="text-xs font-medium text-muted-foreground">Pos Y</span>
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="number" min="-100" max="100"
+                          value={subjectY}
+                          onChange={(e) => setSubjectY(parseInt(e.target.value) || 0)}
+                          className="w-16 bg-background border border-border rounded text-xs px-2 py-1 font-mono text-right focus:outline-accent"
+                        />
+                        <span className="text-muted-foreground text-xs font-mono">%</span>
+                      </div>
+                    </div>
+                    <input
+                      type="range" min="-100" max="100"
+                      value={subjectY}
+                      onChange={(e) => setSubjectY(parseInt(e.target.value))}
+                      className="w-full h-1 bg-border rounded-lg appearance-none cursor-pointer accent-foreground"
+                    />
+                  </div>
+                </div>
+              </div>
+            )}
 
           </aside>
 
@@ -795,7 +969,7 @@ export default function Home() {
                 </div>
                 <h2 className="text-2xl font-bold text-slate-800 dark:text-slate-200 mb-2">Your canvas is empty</h2>
                 <p className="text-slate-500 max-w-md">
-                  Upload your product images with white backgrounds to instantly remove them and preview against a new environment.
+                  Upload your product images, then enable BG Removal, PS BG Removal, or run the Photoshop action on specific shots.
                 </p>
               </div>
             ) : (
@@ -823,9 +997,39 @@ export default function Home() {
                           <p className="font-semibold text-sm truncate text-foreground">{img.name}</p>
                         </div>
                         <div className="flex gap-1.5">
+                          <button
+                            onClick={async (e) => {
+                              e.stopPropagation();
+                              if (img.status === "processing") return;
+
+                              setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "processing" } : p));
+                              try {
+                                const { transparentUrl, compositedUrl, bgRemovalSource } = await applyBgRemoval(img, "photoshop-manual");
+                                setImages(prev => prev.map(p =>
+                                  p.id === img.id
+                                    ? { ...p, transparentUrl, compositedUrl, bgRemovalSource, status: "done" }
+                                    : p
+                                ));
+                              } catch (error) {
+                                console.error("Photoshop BG removal failed for " + img.name, error);
+                                setImages(prev => prev.map(p =>
+                                  p.id === img.id ? { ...p, status: "error" } : p
+                                ));
+                              }
+                            }}
+                            disabled={img.status === "processing"}
+                            className="text-xs font-semibold px-2.5 py-1.5 rounded-md bg-accent/10 text-accent hover:bg-accent hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-1.5"
+                            title="Run Photoshop BG removal"
+                          >
+                            <Layers className="w-3.5 h-3.5" />
+                            <span>PS</span>
+                          </button>
                           {bgImageUrl && (
                             <button
-                              onClick={() => setEditingImageId(editingImageId === img.id ? null : img.id)}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setEditingImageId(editingImageId === img.id ? null : img.id);
+                              }}
                               className={`p-2 rounded-full transition-colors ${editingImageId === img.id ? 'bg-foreground text-background shadow-md' : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'}`}
                               title="Custom Placement"
                             >
@@ -833,7 +1037,10 @@ export default function Home() {
                             </button>
                           )}
                           <button
-                            onClick={() => removeImage(img.id)}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeImage(img.id);
+                            }}
                             className="text-muted-foreground hover:text-red-500 transition-colors p-2 rounded-full hover:bg-red-50/50 dark:hover:bg-red-950/30"
                           >
                             <Trash2 className="w-4 h-4" />

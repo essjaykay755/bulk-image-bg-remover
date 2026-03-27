@@ -7,6 +7,23 @@ app.displayDialogs = DialogModes.NO;
 var success = false;
 var errorMsg = "";
 
+function applyCurrentLayerMaskIfPresent() {
+    try {
+        var idDlt = charIDToTypeID("Dlt ");
+        var desc = new ActionDescriptor();
+        var idnull = charIDToTypeID("null");
+        var ref = new ActionReference();
+        var idChnl = charIDToTypeID("Chnl");
+        var idMsk = charIDToTypeID("Msk ");
+        ref.putEnumerated(idChnl, idChnl, idMsk);
+        desc.putReference(idnull, ref);
+        desc.putBoolean(charIDToTypeID("Aply"), true);
+        executeAction(idDlt, desc, DialogModes.NO);
+    } catch (e) {
+        // No mask on the active layer, or Photoshop can't apply it here.
+    }
+}
+
 try {
     // Load the .ATN file if not already loaded
     try {
@@ -22,6 +39,10 @@ try {
 
     // Run the Photoshop action
     app.doAction("ACTION_NAME_PLACEHOLDER", "ACTION_SET_PLACEHOLDER");
+
+    // Bake a generated layer mask into transparency before saving.
+    // This makes the exported PNG much more reliable for the app pipeline.
+    applyCurrentLayerMaskIfPresent();
 
     // Save output as PNG
     var outputFile = new File("OUTPUT_PATH_PLACEHOLDER");

@@ -25,7 +25,7 @@ export default function Home() {
           </button>
 
           <h1 className="text-5xl md:text-7xl font-extrabold tracking-tighter leading-none text-foreground mb-4">
-            Lumina
+            Swamp
           </h1>
           <p className="text-muted-foreground text-lg md:text-xl max-w-[60ch] leading-relaxed mx-auto">
             Professional bulk image processing, simplified.

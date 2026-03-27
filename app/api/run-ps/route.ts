@@ -6,6 +6,14 @@ import os from "os";
 import { promisify } from "util";
 
 const execFileAsync = promisify(execFile);
+type PhotoshopActionKey = "surfaceBlur" | "bgRemoval";
+
+interface PhotoshopActionConfig {
+    atnPath: string;
+    actionName: string;
+    actionSet: string;
+    tempPrefix: string;
+}
 
 // ─── Server-side PS semaphore ─────────────────────────────────────────────────
 // Only ONE Photoshop job can run at a time across all concurrent HTTP requests.
@@ -55,17 +63,39 @@ async function isProcessRunning(processName: string) {
     }
 }
 
-async function runPSJob(imageBase64: string, mimeType: string): Promise<{ imageBase64: string; mimeType: string }> {
+function getPhotoshopActionConfig(actionKey: PhotoshopActionKey): PhotoshopActionConfig {
+    if (actionKey === "bgRemoval") {
+        return {
+            atnPath:
+                process.env.PS_BG_ACTION_FILE ||
+                "C:\\Users\\Subhojit Karmakar\\AppData\\Roaming\\Adobe\\Adobe Photoshop 2026\\Presets\\Actions\\BG Removal.atn",
+            actionName: process.env.PS_BG_ACTION_NAME || "BG Removal",
+            actionSet: process.env.PS_BG_ACTION_SET || "BG Removal",
+            tempPrefix: "ps-bg-removal",
+        };
+    }
+
+    return {
+        atnPath:
+            process.env.PS_ACTION_FILE ||
+            "C:\\Users\\Subhojit Karmakar\\AppData\\Roaming\\Adobe\\Adobe Photoshop 2026\\Presets\\Actions\\Surface blur with selection.atn",
+        actionName: process.env.PS_ACTION_NAME || "Surface blur with selection",
+        actionSet: process.env.PS_ACTION_SET || "Surface Blur",
+        tempPrefix: "ps-surface-blur",
+    };
+}
+
+async function runPSJob(
+    imageBase64: string,
+    mimeType: string,
+    actionKey: PhotoshopActionKey
+): Promise<{ imageBase64: string; mimeType: string }> {
     const psPath =
         process.env.PHOTOSHOP_PATH ||
         "C:\\Program Files\\Adobe\\Adobe Photoshop 2026\\Photoshop.exe";
-    const atnPath =
-        process.env.PS_ACTION_FILE ||
-        "C:\\Users\\Subhojit Karmakar\\AppData\\Roaming\\Adobe\\Adobe Photoshop 2026\\Presets\\Actions\\Surface blur with selection.atn";
-    const actionName = process.env.PS_ACTION_NAME || "Surface blur with selection";
-    const actionSet = process.env.PS_ACTION_SET || "Surface Blur";
+    const { atnPath, actionName, actionSet, tempPrefix } = getPhotoshopActionConfig(actionKey);
 
-    const tempDir = path.join(os.tmpdir(), `ps-blur-${Date.now()}`);
+    const tempDir = path.join(os.tmpdir(), `${tempPrefix}-${Date.now()}`);
     fs.mkdirSync(tempDir, { recursive: true });
 
     const ext = mimeType === "image/png" ? "png" : "jpg";
@@ -179,18 +209,19 @@ async function runPSJob(imageBase64: string, mimeType: string): Promise<{ imageB
 
 export async function POST(req: NextRequest) {
     try {
-        const { imageBase64, mimeType } = await req.json();
+        const { imageBase64, mimeType, action } = await req.json();
+        const actionKey: PhotoshopActionKey = action === "bgRemoval" ? "bgRemoval" : "surfaceBlur";
 
         if (!imageBase64) {
             return NextResponse.json({ error: "Missing imageBase64" }, { status: 400 });
         }
 
         // Strictly serialise: wait for any in-flight PS job to finish first
-        const result = await enqueuePS(() => runPSJob(imageBase64, mimeType || "image/jpeg"));
+        const result = await enqueuePS(() => runPSJob(imageBase64, mimeType || "image/jpeg", actionKey));
         return NextResponse.json(result);
     } catch (error: unknown) {
         const message = error instanceof Error ? error.message : "Internal server error";
-        console.error("PS Surface Blur error:", message);
+        console.error("Photoshop action error:", message);
         return NextResponse.json(
             { error: message },
             { status: 500 }

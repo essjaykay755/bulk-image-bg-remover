@@ -7,7 +7,7 @@ export async function POST(req: NextRequest) {
         // Handle Logout
         if (action === "logout") {
             const response = NextResponse.json({ success: true });
-            response.cookies.set("lumina_auth", "", {
+            response.cookies.set("swamp_auth", "", {
                 httpOnly: true,
                 expires: new Date(0),
                 path: "/",
@@ -22,7 +22,7 @@ export async function POST(req: NextRequest) {
             const response = NextResponse.json({ success: true });
 
             // Set a secure cookie
-            response.cookies.set("lumina_auth", adminPassword, {
+            response.cookies.set("swamp_auth", adminPassword, {
                 httpOnly: true,
                 secure: process.env.NODE_ENV === "production",
                 sameSite: "lax",

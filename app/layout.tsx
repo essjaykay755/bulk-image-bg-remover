@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Lumina | Professional Image Suite",
+  title: "Swamp | Product Image Processing",
   description: "Fast, bulk image processing directly in your browser.",
 };
 

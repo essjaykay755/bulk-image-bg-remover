@@ -15,7 +15,7 @@ export function middleware(request: NextRequest) {
     }
 
     // Check for the auth cookie
-    const authCookie = request.cookies.get('lumina_auth');
+    const authCookie = request.cookies.get('swamp_auth');
     const sessionToken = process.env.AUTH_PASSWORD || 'password123';
 
     if (!authCookie || authCookie.value !== sessionToken) {
