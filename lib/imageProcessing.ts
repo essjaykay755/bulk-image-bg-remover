@@ -122,7 +122,118 @@ export const removeWhiteBackground = async (
   }
 };
 
+const loadImage = (src: string): Promise<HTMLImageElement> => {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error("Failed to load image"));
+    img.src = src;
+  });
+};
 
+const getPlacementBounds = (
+  foregroundWidth: number,
+  foregroundHeight: number,
+  canvasWidth: number,
+  canvasHeight: number,
+  scale: number,
+  offsetX: number,
+  offsetY: number
+) => {
+  const fgRatio = foregroundWidth / foregroundHeight;
+  const canvasRatio = canvasWidth / canvasHeight;
+
+  let baseWidth: number;
+  let baseHeight: number;
+
+  if (fgRatio > canvasRatio) {
+    baseWidth = canvasWidth;
+    baseHeight = canvasWidth / fgRatio;
+  } else {
+    baseHeight = canvasHeight;
+    baseWidth = canvasHeight * fgRatio;
+  }
+
+  const finalW = baseWidth * scale;
+  const finalH = baseHeight * scale;
+
+  const centerX = canvasWidth / 2;
+  const centerY = canvasHeight / 2;
+  const shiftX = (canvasWidth * offsetX) / 100;
+  const shiftY = (canvasHeight * offsetY) / 100;
+
+  return {
+    canvasWidth,
+    canvasHeight,
+    drawX: centerX - (finalW / 2) + shiftX,
+    drawY: centerY - (finalH / 2) + shiftY,
+    drawWidth: finalW,
+    drawHeight: finalH,
+  };
+};
+
+export const renderPlacedImage = async (
+  foregroundDataUrl: string,
+  options?: {
+    backgroundDataUrl?: string | null;
+    scale?: number;
+    offsetX?: number;
+    offsetY?: number;
+  }
+): Promise<string> => {
+  const {
+    backgroundDataUrl = null,
+    scale = 1.0,
+    offsetX = 0,
+    offsetY = 0,
+  } = options ?? {};
+
+  const [fgImg, bgImg] = await Promise.all([
+    loadImage(foregroundDataUrl),
+    backgroundDataUrl ? loadImage(backgroundDataUrl) : Promise.resolve(null),
+  ]);
+
+  const canvasWidth = bgImg?.width ?? fgImg.width;
+  const canvasHeight = bgImg?.height ?? fgImg.height;
+
+  return new Promise((resolve, reject) => {
+    const canvas = document.createElement("canvas");
+    canvas.width = canvasWidth;
+    canvas.height = canvasHeight;
+    const ctx = canvas.getContext("2d");
+
+    if (!ctx) {
+      reject(new Error("Failed to get canvas context"));
+      return;
+    }
+
+    if (bgImg) {
+      ctx.drawImage(bgImg, 0, 0);
+    } else {
+      ctx.clearRect(0, 0, canvasWidth, canvasHeight);
+    }
+
+    const bounds = getPlacementBounds(
+      fgImg.width,
+      fgImg.height,
+      canvasWidth,
+      canvasHeight,
+      scale,
+      offsetX,
+      offsetY
+    );
+
+    ctx.drawImage(fgImg, bounds.drawX, bounds.drawY, bounds.drawWidth, bounds.drawHeight);
+
+    canvas.toBlob((blob) => {
+      if (blob) {
+        resolve(URL.createObjectURL(blob));
+      } else {
+        reject(new Error("Failed to create image blob"));
+      }
+    }, "image/png");
+  });
+};
 
 export const compositeImage = async (
   foregroundDataUrl: string,
@@ -131,73 +242,11 @@ export const compositeImage = async (
   offsetX: number = 0,
   offsetY: number = 0
 ): Promise<string> => {
-  return new Promise((resolve, reject) => {
-    const bgImg = new Image();
-    const fgImg = new Image();
-
-    bgImg.onload = () => {
-      fgImg.onload = () => {
-        const canvas = document.createElement("canvas");
-        // Canvas is now the size of the background
-        canvas.width = bgImg.width;
-        canvas.height = bgImg.height;
-        const ctx = canvas.getContext("2d");
-
-        if (!ctx) {
-          reject(new Error("Failed to get canvas context"));
-          return;
-        }
-
-        // Draw background
-        ctx.drawImage(bgImg, 0, 0);
-
-        // Draw foreground
-        // base scale to fit inside bg
-        const fgRatio = fgImg.width / fgImg.height;
-        const bgRatio = bgImg.width / bgImg.height;
-        let baseWidth, baseHeight;
-
-        if (fgRatio > bgRatio) {
-          // Fg is wider relative to its height than Bg
-          baseWidth = bgImg.width;
-          baseHeight = bgImg.width / fgRatio;
-        } else {
-          baseHeight = bgImg.height;
-          baseWidth = bgImg.height * fgRatio;
-        }
-
-        const finalW = baseWidth * scale;
-        const finalH = baseHeight * scale;
-
-        // centering
-        const centerX = bgImg.width / 2;
-        const centerY = bgImg.height / 2;
-
-        // offsetX and offsetY are percentages of bg dimensions (-100 to 100)
-        const shiftX = (bgImg.width * offsetX) / 100;
-        const shiftY = (bgImg.height * offsetY) / 100;
-
-        const drawX = centerX - (finalW / 2) + shiftX;
-        const drawY = centerY - (finalH / 2) + shiftY;
-
-        ctx.drawImage(fgImg, drawX, drawY, finalW, finalH);
-
-        // Use toBlob instead of toDataURL to avoid massive base64 strings in JS heap
-        canvas.toBlob((blob) => {
-          if (blob) {
-            resolve(URL.createObjectURL(blob));
-          } else {
-            reject(new Error("Failed to create image blob"));
-          }
-        }, "image/png");
-      };
-
-      fgImg.onerror = reject;
-      fgImg.src = foregroundDataUrl;
-    };
-
-    bgImg.onerror = reject;
-    bgImg.src = backgroundDataUrl;
+  return renderPlacedImage(foregroundDataUrl, {
+    backgroundDataUrl,
+    scale,
+    offsetX,
+    offsetY,
   });
 };
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect } from "react";
-import { removeWhiteBackground, compositeImage, BgRemovalMode } from "@/lib/imageProcessing";
+import { removeWhiteBackground, compositeImage, renderPlacedImage, BgRemovalMode } from "@/lib/imageProcessing";
 import Link from "next/link";
 import { Upload, Image as ImageIcon, Download, Trash2, SlidersHorizontal, Settings2, FileImage, Layers, ArrowLeft, FolderOpen, Loader2, CheckSquare, Square } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -10,6 +10,15 @@ import { saveAs } from "file-saver";
 
 const BATCH_SIZE = 5;
 const yieldToMain = () => new Promise<void>(resolve => setTimeout(resolve, 0));
+const DEFAULT_PLACEMENT = { scale: 1, x: 0, y: 0 };
+
+type Placement = typeof DEFAULT_PLACEMENT;
+const PLACEMENT_PRESETS: Array<Placement & { label: string }> = [
+  { label: "Preset 1", scale: 0.55, x: 0, y: 14 },
+  { label: "Preset 1a", scale: 0.55, x: 0, y: 18 },
+  { label: "Preset 2", scale: 0.65, x: 0, y: 14 },
+  { label: "Preset 2a", scale: 0.8, x: 0, y: 21 },
+];
 
 interface ProcessedImage {
   id: string;
@@ -25,6 +34,69 @@ interface ProcessedImage {
   customY?: number;
   relativePath?: string;
 }
+
+const getPlacementForImage = (
+  img: ProcessedImage,
+  defaults: Placement
+): Placement => ({
+  scale: img.customScale !== undefined ? img.customScale : defaults.scale,
+  x: img.customX !== undefined ? img.customX : defaults.x,
+  y: img.customY !== undefined ? img.customY : defaults.y,
+});
+
+const shouldRenderPlacedOutput = (
+  placement: Placement,
+  backgroundUrl: string | null
+) => {
+  return Boolean(backgroundUrl) ||
+    placement.scale !== DEFAULT_PLACEMENT.scale ||
+    placement.x !== DEFAULT_PLACEMENT.x ||
+    placement.y !== DEFAULT_PLACEMENT.y;
+};
+
+const renderFinalOutput = async (
+  transparentUrl: string,
+  placement: Placement,
+  backgroundUrl: string | null
+) => {
+  if (!shouldRenderPlacedOutput(placement, backgroundUrl)) {
+    return null;
+  }
+
+  if (backgroundUrl) {
+    return compositeImage(
+      transparentUrl,
+      backgroundUrl,
+      placement.scale,
+      placement.x,
+      placement.y
+    );
+  }
+
+  return renderPlacedImage(transparentUrl, {
+    scale: placement.scale,
+    offsetX: placement.x,
+    offsetY: placement.y,
+  });
+};
+
+const renderImageOutputForImage = async (
+  img: ProcessedImage,
+  transparentUrl: string,
+  options: {
+    backgroundUrl: string | null;
+    defaults: Placement;
+    placement?: Placement;
+  }
+) => {
+  const placement = options.placement ?? getPlacementForImage(img, options.defaults);
+  const compositedUrl = await renderFinalOutput(
+    transparentUrl,
+    placement,
+    options.backgroundUrl
+  );
+  return { compositedUrl, placement };
+};
 
 export default function Home() {
   const [images, setImages] = useState<ProcessedImage[]>([]);
@@ -91,26 +163,30 @@ export default function Home() {
   };
 
   const activeEditingImage = images.find(img => img.id === editingImageId);
+  const activeEditingTransparentUrl = activeEditingImage?.transparentUrl ?? null;
+  const activeEditingCustomScale = activeEditingImage?.customScale;
+  const activeEditingCustomX = activeEditingImage?.customX;
+  const activeEditingCustomY = activeEditingImage?.customY;
   const activeAutoBgRemovalSource = psBgRemovalEnabled
     ? "photoshop-auto"
     : bgRemovalEnabled
       ? "auto"
       : null;
 
-  const getPlacementForImage = (img: ProcessedImage) => ({
-    scale: img.customScale !== undefined ? img.customScale : subjectScale,
-    x: img.customX !== undefined ? img.customX : subjectX,
-    y: img.customY !== undefined ? img.customY : subjectY,
-  });
+  const hasTransparentImages = images.some(img => Boolean(img.transparentUrl));
+  const selectedImageCount = images.reduce(
+    (count, img) => count + (selectedIds.has(img.id) ? 1 : 0),
+    0
+  );
+  const hasSelectedTransparentImages = images.some(
+    img => selectedIds.has(img.id) && Boolean(img.transparentUrl)
+  );
 
   const buildBgRemovalOutput = async (img: ProcessedImage, transparentUrl: string) => {
-    let compositedUrl: string | null = null;
-
-    if (bgImageUrl) {
-      const { scale, x, y } = getPlacementForImage(img);
-      compositedUrl = await compositeImage(transparentUrl, bgImageUrl, scale, x, y);
-    }
-
+    const { compositedUrl } = await renderImageOutputForImage(img, transparentUrl, {
+      backgroundUrl: bgImageUrl,
+      defaults: { scale: subjectScale, x: subjectX, y: subjectY },
+    });
     return { transparentUrl, compositedUrl };
   };
 
@@ -169,33 +245,44 @@ export default function Home() {
 
   // Debounced effect for individual recompositions
   useEffect(() => {
-    if (!editingImageId || !bgImageUrl) return;
-    const img = images.find(p => p.id === editingImageId);
-    if (!img || !img.transparentUrl) return;
+    if (!editingImageId || !activeEditingTransparentUrl) return;
 
-    const scale = img.customScale !== undefined ? img.customScale : subjectScale;
-    const x = img.customX !== undefined ? img.customX : subjectX;
-    const y = img.customY !== undefined ? img.customY : subjectY;
+    const placement = {
+      scale: activeEditingCustomScale !== undefined ? activeEditingCustomScale : subjectScale,
+      x: activeEditingCustomX !== undefined ? activeEditingCustomX : subjectX,
+      y: activeEditingCustomY !== undefined ? activeEditingCustomY : subjectY,
+    };
+    let didCancel = false;
 
     const timeout = setTimeout(async () => {
-      setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "processing" } : p));
       try {
-        let compositedUrl = null;
-        if (bgImageUrl) {
-          compositedUrl = await compositeImage(img.transparentUrl!, bgImageUrl, scale, x, y);
+        const compositedUrl = await renderFinalOutput(activeEditingTransparentUrl, placement, bgImageUrl);
+        if (didCancel) {
+          if (compositedUrl) URL.revokeObjectURL(compositedUrl);
+          return;
         }
-        setImages(prev => prev.map(p => p.id === img.id ? { ...p, compositedUrl, status: "done" } : p));
-      } catch (e) {
-        setImages(prev => prev.map(p => p.id === img.id ? { ...p, status: "error" } : p));
+        setImages(prev => prev.map(p =>
+          p.id === editingImageId ? { ...p, compositedUrl, status: "done" } : p
+        ));
+      } catch {
+        if (didCancel) return;
+        setImages(prev => prev.map(p => p.id === editingImageId ? { ...p, status: "error" } : p));
       }
     }, 200);
-    return () => clearTimeout(timeout);
+    return () => {
+      didCancel = true;
+      clearTimeout(timeout);
+    };
   }, [
     editingImageId,
+    activeEditingTransparentUrl,
+    activeEditingCustomScale,
+    activeEditingCustomX,
+    activeEditingCustomY,
     bgImageUrl,
-    images.find(p => p.id === editingImageId)?.customScale,
-    images.find(p => p.id === editingImageId)?.customX,
-    images.find(p => p.id === editingImageId)?.customY
+    subjectScale,
+    subjectX,
+    subjectY,
   ]);
 
   // File Input Refs
@@ -334,14 +421,14 @@ export default function Home() {
       const batch = toProcess.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (img) => {
         try {
-          const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
-          const actX = img.customX !== undefined ? img.customX : subjectX;
-          const actY = img.customY !== undefined ? img.customY : subjectY;
-          const compositedUrl = await compositeImage(img.transparentUrl!, url, actScale, actX, actY);
+          const { compositedUrl } = await renderImageOutputForImage(img, img.transparentUrl!, {
+            backgroundUrl: url,
+            defaults: { scale: subjectScale, x: subjectX, y: subjectY },
+          });
           setImages(prev => prev.map(p =>
             p.id === img.id ? { ...p, compositedUrl, status: "done" } : p
           ));
-        } catch (error) {
+        } catch {
           setImages(prev => prev.map(p =>
             p.id === img.id ? { ...p, status: "done" } : p
           ));
@@ -356,18 +443,87 @@ export default function Home() {
 
   const removeImage = (id: string) => {
     setImages(prev => prev.filter(img => img.id !== id));
+    setSelectedIds(prev => {
+      const next = new Set(prev);
+      next.delete(id);
+      return next;
+    });
+    if (editingImageId === id) {
+      setEditingImageId(null);
+    }
+  };
+
+  const deleteSelectedImages = () => {
+    const idsToDelete = new Set(
+      images.filter(img => selectedIds.has(img.id)).map(img => img.id)
+    );
+
+    if (idsToDelete.size === 0) {
+      clearSelection();
+      return;
+    }
+
+    const itemLabel = idsToDelete.size === 1 ? "image" : "images";
+    if (!window.confirm(`Delete ${idsToDelete.size} selected ${itemLabel}? This cannot be undone.`)) {
+      return;
+    }
+
+    setImages(prev => prev.filter(img => !idsToDelete.has(img.id)));
+    setSelectedIds(new Set());
+    if (editingImageId && idsToDelete.has(editingImageId)) {
+      setEditingImageId(null);
+    }
   };
 
   const clearAllImages = () => {
     if (window.confirm("Are you sure you want to remove all images?")) {
       setImages([]);
+      clearSelection();
+      setEditingImageId(null);
     }
   };
 
   const clearBackground = async () => {
     setBgImageFile(null);
     setBgImageUrl(null);
-    setImages(prev => prev.map(img => ({ ...img, compositedUrl: null })));
+
+    const currentImages = imagesRef.current;
+    const toProcess = currentImages.filter(img => img.transparentUrl);
+
+    if (toProcess.length === 0) {
+      setImages(prev => prev.map(img => ({ ...img, compositedUrl: null })));
+      return;
+    }
+
+    setBatchProgress({ label: "Clearing Background", current: 0, total: toProcess.length, currentFile: "" });
+    setImages(prev => prev.map(img => (
+      img.transparentUrl ? { ...img, status: "processing" } : img
+    )));
+
+    let processed = 0;
+    for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
+      const batch = toProcess.slice(i, i + BATCH_SIZE);
+      await Promise.all(batch.map(async (img) => {
+        try {
+          const { compositedUrl } = await renderImageOutputForImage(img, img.transparentUrl!, {
+            backgroundUrl: null,
+            defaults: { scale: subjectScale, x: subjectX, y: subjectY },
+          });
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, compositedUrl, status: "done" } : p
+          ));
+        } catch {
+          setImages(prev => prev.map(p =>
+            p.id === img.id ? { ...p, status: "error" } : p
+          ));
+        }
+        processed++;
+        setBatchProgress({ label: "Clearing Background", current: processed, total: toProcess.length, currentFile: img.name });
+      }));
+      await yieldToMain();
+    }
+
+    setBatchProgress(null);
   };
 
   const downloadAll = async () => {
@@ -433,7 +589,6 @@ export default function Home() {
     setSubjectX(x);
     setSubjectY(y);
 
-    if (!bgImageUrl) return;
     const currentImages = imagesRef.current;
     const toProcess = currentImages.filter(img => img.transparentUrl);
     if (toProcess.length === 0) return;
@@ -447,14 +602,14 @@ export default function Home() {
       const batch = toProcess.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (img) => {
         try {
-          const actScale = img.customScale !== undefined ? img.customScale : scale;
-          const actX = img.customX !== undefined ? img.customX : x;
-          const actY = img.customY !== undefined ? img.customY : y;
-          const compositedUrl = await compositeImage(img.transparentUrl!, bgImageUrl, actScale, actX, actY);
+          const { compositedUrl } = await renderImageOutputForImage(img, img.transparentUrl!, {
+            backgroundUrl: bgImageUrl,
+            defaults: { scale, x, y },
+          });
           setImages(prev => prev.map(p =>
             p.id === img.id ? { ...p, compositedUrl, status: "done" } : p
           ));
-        } catch (e) {
+        } catch {
           setImages(prev => prev.map(p =>
             p.id === img.id ? { ...p, status: "error" } : p
           ));
@@ -469,7 +624,7 @@ export default function Home() {
 
   // Apply a preset to only the selected images (with progress bar)
   const applyPresetToSelected = async (scale: number, x: number, y: number) => {
-    if (!bgImageUrl || selectedIds.size === 0) return;
+    if (selectedIds.size === 0) return;
     const currentImages = imagesRef.current;
     const toProcess = currentImages.filter(img => selectedIds.has(img.id) && img.transparentUrl);
     if (toProcess.length === 0) return;
@@ -483,11 +638,15 @@ export default function Home() {
       const batch = toProcess.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (img) => {
         try {
-          const compositedUrl = await compositeImage(img.transparentUrl!, bgImageUrl, scale, x, y);
+          const { compositedUrl } = await renderImageOutputForImage(img, img.transparentUrl!, {
+            backgroundUrl: bgImageUrl,
+            defaults: { scale: subjectScale, x: subjectX, y: subjectY },
+            placement: { scale, x, y },
+          });
           setImages(prev => prev.map(p =>
             p.id === img.id ? { ...p, compositedUrl, customScale: scale, customX: x, customY: y, status: "done" } : p
           ));
-        } catch (e) {
+        } catch {
           setImages(prev => prev.map(p =>
             p.id === img.id ? { ...p, status: "error" } : p
           ));
@@ -503,7 +662,7 @@ export default function Home() {
 
   // Trigger re-composite when subject placement changes (sliders only, no progress bar)
   useEffect(() => {
-    if (images.length === 0 || !bgImageUrl) return;
+    if (images.length === 0) return;
     // Skip if a preset just handled this
     if (skipRecompositeRef.current) {
       skipRecompositeRef.current = false;
@@ -511,23 +670,24 @@ export default function Home() {
     }
     const recomposite = async () => {
       const currentImages = imagesRef.current;
-      setImages(prev => prev.map(img => ({ ...img, status: "processing" })));
       const toProcess = currentImages.filter(img => img.transparentUrl);
+      if (toProcess.length === 0) return;
+
+      setImages(prev => prev.map(img => (
+        img.transparentUrl ? { ...img, status: "processing" } : img
+      )));
       for (let i = 0; i < toProcess.length; i += BATCH_SIZE) {
         const batch = toProcess.slice(i, i + BATCH_SIZE);
         await Promise.all(batch.map(async (img) => {
           try {
-            let compositedUrl = null;
-            if (bgImageUrl) {
-              const actScale = img.customScale !== undefined ? img.customScale : subjectScale;
-              const actX = img.customX !== undefined ? img.customX : subjectX;
-              const actY = img.customY !== undefined ? img.customY : subjectY;
-              compositedUrl = await compositeImage(img.transparentUrl!, bgImageUrl, actScale, actX, actY);
-            }
+            const { compositedUrl } = await renderImageOutputForImage(img, img.transparentUrl!, {
+              backgroundUrl: bgImageUrl,
+              defaults: { scale: subjectScale, x: subjectX, y: subjectY },
+            });
             setImages(prev => prev.map(p =>
               p.id === img.id ? { ...p, compositedUrl, status: "done" } : p
             ));
-          } catch (e) {
+          } catch {
             setImages(prev => prev.map(p =>
               p.id === img.id ? { ...p, status: "error" } : p
             ));
@@ -538,7 +698,7 @@ export default function Home() {
     };
     const timeout = setTimeout(recomposite, 200);
     return () => clearTimeout(timeout);
-  }, [subjectScale, subjectX, subjectY]);
+  }, [bgImageUrl, images.length, subjectScale, subjectX, subjectY]);
 
   // Trigger background removal when the auto-removal stage is enabled or reconfigured
   useEffect(() => {
@@ -585,7 +745,7 @@ export default function Home() {
             setImages(prev => prev.map(p =>
               p.id === img.id ? { ...p, transparentUrl, compositedUrl, bgRemovalSource, status: "done" } : p
             ));
-          } catch (e) {
+          } catch {
             setImages(prev => prev.map(p =>
               p.id === img.id ? { ...p, status: "error" } : p
             ));
@@ -601,7 +761,10 @@ export default function Home() {
 
     const timeout = setTimeout(reprocess, 800);
     return () => clearTimeout(timeout);
-  }, [activeAutoBgRemovalSource, tolerance, bgRemovalMode]);
+  // Background changes are handled by the dedicated upload/clear flows, so this effect
+  // intentionally tracks only the auto-removal controls.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeAutoBgRemovalSource, images.length, tolerance, bgRemovalMode]);
 
   return (
     <div className="min-h-[100dvh] bg-background text-foreground font-sans selection:bg-accent/30 selection:text-accent-foreground p-6 sm:p-8 md:p-12 transition-colors duration-500">
@@ -869,17 +1032,14 @@ export default function Home() {
               )}
             </div>
 
-            {bgImageUrl && (
+            {hasTransparentImages && (
               <div className="liquid-glass p-8 rounded-[2.5rem] transition-all">
                 <div className="flex items-center justify-between pb-2 mb-6">
                   <h3 className="text-lg font-bold tracking-tight text-foreground">
                     Placement
                   </h3>
-                  <div className="flex gap-1.5">
-                    {[
-                      { label: "Preset 1", scale: 0.55, x: 0, y: 14 },
-                      { label: "Preset 2", scale: 0.65, x: 0, y: 14 }
-                    ].map(preset => (
+                  <div className="flex flex-wrap justify-end gap-1.5">
+                    {PLACEMENT_PRESETS.map(preset => (
                       <button
                         key={preset.label}
                         onClick={() => applyGlobalPreset(preset.scale, preset.x, preset.y)}
@@ -1024,7 +1184,7 @@ export default function Home() {
                             <Layers className="w-3.5 h-3.5" />
                             <span>PS</span>
                           </button>
-                          {bgImageUrl && (
+                          {img.transparentUrl && (
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -1061,7 +1221,11 @@ export default function Home() {
                         {(img.compositedUrl || img.transparentUrl) ? (
                           <div className="relative w-full aspect-square flex items-center justify-center overflow-hidden">
                             {img.compositedUrl ? (
-                              <img src={img.compositedUrl} alt="Composited" className="w-full h-full object-cover" />
+                              <img
+                                src={img.compositedUrl}
+                                alt="Composited"
+                                className={`w-full h-full ${bgImageUrl ? "object-cover" : "object-contain"}`}
+                              />
                             ) : (
                               <img src={img.transparentUrl!} alt="Transparent" className="w-[85%] h-[85%] object-contain drop-shadow-xl" />
                             )}
@@ -1086,15 +1250,15 @@ export default function Home() {
 
       {/* Floating Selection Action Bar */}
       <AnimatePresence>
-        {selectedIds.size > 0 && bgImageUrl && (
+        {selectedImageCount > 0 && (
           <motion.div
             initial={{ opacity: 0, y: 40 }}
             animate={{ opacity: 1, y: 0 }}
             exit={{ opacity: 0, y: 40 }}
-            className="fixed bottom-8 left-1/2 -translate-x-1/2 z-40 liquid-glass rounded-full px-6 py-3 shadow-2xl border border-border/50 flex items-center gap-4"
+            className="fixed bottom-8 left-1/2 -translate-x-1/2 z-40 max-w-[calc(100vw-2rem)] liquid-glass rounded-[1.5rem] sm:rounded-full px-4 sm:px-6 py-3 shadow-2xl border border-border/50 flex flex-wrap items-center justify-center gap-4"
           >
             <span className="text-sm font-semibold text-foreground whitespace-nowrap">
-              {selectedIds.size} selected
+              {selectedImageCount} selected
             </span>
             <div className="w-px h-6 bg-border" />
             <button
@@ -1109,19 +1273,23 @@ export default function Home() {
             >
               Clear
             </button>
-            <div className="w-px h-6 bg-border" />
-            {[
-              { label: "Preset 1", scale: 0.55, x: 0, y: 14 },
-              { label: "Preset 2", scale: 0.65, x: 0, y: 14 }
-            ].map(preset => (
-              <button
-                key={preset.label}
-                onClick={() => applyPresetToSelected(preset.scale, preset.x, preset.y)}
-                className="text-xs font-semibold uppercase tracking-wider bg-foreground text-background px-3 py-1.5 rounded-full hover:opacity-90 transition-opacity shadow-md whitespace-nowrap"
-              >
-                {preset.label}
-              </button>
-            ))}
+            <button
+              onClick={deleteSelectedImages}
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-red-500 hover:text-red-400 transition-colors whitespace-nowrap"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Delete
+            </button>
+            {hasSelectedTransparentImages && <div className="w-px h-6 bg-border" />}
+            {hasSelectedTransparentImages && PLACEMENT_PRESETS.map(preset => (
+                <button
+                  key={preset.label}
+                  onClick={() => applyPresetToSelected(preset.scale, preset.x, preset.y)}
+                  className="text-xs font-semibold uppercase tracking-wider bg-foreground text-background px-3 py-1.5 rounded-full hover:opacity-90 transition-opacity shadow-md whitespace-nowrap"
+                >
+                  {preset.label}
+                </button>
+              ))}
           </motion.div>
         )}
       </AnimatePresence>
@@ -1191,12 +1359,9 @@ export default function Home() {
                         </button>
                       )}
                     </div>
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="text-xs font-medium text-muted-foreground mr-1">Presets:</span>
-                      {[
-                        { label: "Preset 1", scale: 0.55, x: 0, y: 14 },
-                        { label: "Preset 2", scale: 0.65, x: 0, y: 14 }
-                      ].map(preset => (
+                      {PLACEMENT_PRESETS.map(preset => (
                         <button
                           key={preset.label}
                           onClick={() => handleCustomPlacement(activeEditingImage.id, preset.scale, preset.x, preset.y)}
