@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { Layers, Image as ImageIcon, Sparkles } from "lucide-react";
+import { Layers, Image as ImageIcon, Sparkles, SlidersHorizontal } from "lucide-react";
 
 export default function Home() {
   return (
@@ -34,7 +34,7 @@ export default function Home() {
         </header>
 
         {/* Tools Selection */}
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-8 w-full max-w-6xl">
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8 w-full max-w-7xl">
 
           {/* Tool 1: BG Remover */}
           <Link href="/bg-remover" className="group">
@@ -87,6 +87,24 @@ export default function Home() {
 
               {/* Decorative gradient orb */}
               <div className="absolute -bottom-20 -right-20 w-64 h-64 bg-purple-500 opacity-0 group-hover:opacity-10 blur-3xl rounded-full transition-opacity duration-700 pointer-events-none" />
+            </div>
+          </Link>
+
+          {/* Tool 4: Bulk Editor */}
+          <Link href="/bulk-editor" className="group">
+            <div className="liquid-glass p-10 rounded-[2.5rem] h-full flex flex-col items-start transition-all duration-500 hover:scale-[1.02] hover:shadow-2xl hover:border-emerald-500/50 cursor-pointer overflow-hidden relative border border-border">
+              <div className="w-16 h-16 bg-emerald-500/10 rounded-2xl flex items-center justify-center mb-8 border border-emerald-500/20 group-hover:bg-emerald-500/20 transition-colors">
+                <SlidersHorizontal className="w-8 h-8 text-emerald-500" />
+              </div>
+              <h2 className="text-3xl font-bold tracking-tight mb-4 text-foreground group-hover:text-emerald-500 transition-colors">
+                Bulk Image Editor
+              </h2>
+              <p className="text-muted-foreground text-lg leading-relaxed flex-1">
+                Batch tune brightness, contrast, white balance, tint, exposure, color, sharpness, and tonal recovery.
+              </p>
+
+              {/* Decorative gradient orb */}
+              <div className="absolute -bottom-20 -right-20 w-64 h-64 bg-emerald-500 opacity-0 group-hover:opacity-10 blur-3xl rounded-full transition-opacity duration-700 pointer-events-none" />
             </div>
           </Link>
 
